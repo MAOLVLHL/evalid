@@ -1,5 +1,13 @@
 # Release Notes
 
+## 0.5.7 - Coverage config (c8)
+
+Patch release. One addition since 0.5.6, verified by the full test suite.
+
+**c8 coverage config (#52).** The repo previously had no coverage tooling. Added `c8` (^12.0.0) as a dev-dependency, `.c8rc.json` (covers `src/**` and `bin/**`, excludes `test/**`), and `npm run coverage`, pinned by `test/coverage-config.test.js` (3 assertions). Measured on the merged tree: 372 tests / 372 pass / 0 fail; coverage 84.64% statements / 62.73% branches / 94.02% functions. No runtime behavior changes.
+
+Acceptance debt, stated plainly: the bench-number acceptance for P1-2, P1-3, P2-1 and P2-3 — the wall-clock/token/resolved lines from issue #5 — still awaits the MiniMax full-matrix batch (15 instances × 4 arms × reps 3), which is stopped on MiniMax Token Plan quota exhaustion. No bench numbers are claimed in this release.
+
 ## 0.5.6 - Playwright 1.65.0; js-yaml 5.5.0
 
 Patch release. Two dependency upgrades since 0.5.5, both verified by the full test suite (`npm run verify` exit 0 on the merged tree).

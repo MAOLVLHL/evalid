@@ -5,6 +5,11 @@ All notable changes to this project are documented here. Detailed notes live in
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-11-08
+
+### Added
+- **c8 coverage config (#52)**: the repo previously had no coverage tooling. Added `c8` (^12.0.0) as a dev-dependency, `.c8rc.json` (covers `src/**` and `bin/**`, excludes `test/**`, reports to `coverage/`), and `npm run coverage`; `test/coverage-config.test.js` pins the wiring with 3 assertions; `coverage/` added to `.gitignore`; README dev-commands block gains one line. No runtime behavior changes. Test evidence: `npm run coverage` 372 tests / 372 pass / 0 fail (baseline 369, +3 new); measured coverage 84.64% statements / 62.73% branches / 94.02% functions, `coverage/lcov.info` generated. No bench numbers are involved; the bench-number acceptance for P1-2 / P1-3 / P2-1 / P2-3 still awaits the MiniMax full-matrix batch.
+
 ## [0.5.6] - 2026-11-07
 
 ### Changed
