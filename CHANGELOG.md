@@ -5,6 +5,16 @@ All notable changes to this project are documented here. Detailed notes live in
 
 ## [Unreleased]
 
+## [0.5.8] - 2026-11-08
+
+### Added
+- **README Commands section (#54)**: README had no single command reference; top-level commands were only scattered through prose examples. A Commands section after "3 Minute Start" now lists all 31 top-level commands with a one-line description each, and states explicitly that the installed binary is `xflow` (there is no `evalid` binary). Every entry was checked against live `--help` output (`node bin/xflow.js --help` plus `xflow <command> --help` for all 31 commands, including subcommand lists for spec/qa/visual/launch/adoption/package/demo/goal/atom/host/compare). No CLI behaviour changed; docs only. Test evidence: `npm test` 46 files / 373 tests / 372 pass / 0 fail / 1 skipped (pre-existing).
+
+### Changed
+- **CI actions bumped to v7 (#55)**: `actions/checkout` v4 → v7.0.1 and `actions/setup-node` v4 → v7.1.0, in both workflows (ci.yml, npm-publish.yml — 4 pin sites). Both v4 actions ran on the Node 20 runtime and CI reported Node 20 deprecation warnings; v7 runs on node24 (`runs.using: node24`, read from the action.yml files), so the warnings go away. No behaviour change for this repo: the only trigger events are push / pull_request / release / workflow_dispatch, so checkout v7's fork-PR guard for pull_request_target / workflow_run does not apply; setup-node v7's removal of the dummy NODE_AUTH_TOKEN export does not affect npm Trusted Publishing (OIDC), which npm-publish.yml uses and which never sets NODE_AUTH_TOKEN; node-version stays '22' with cache: npm unchanged. Test evidence: `npm run verify` exit 0 on the merged tree.
+
+Acceptance debt, stated plainly: the bench-number acceptance for P1-2 / P1-3 / P2-1 / P2-3 still awaits the MiniMax full-matrix batch (15 instances × 4 arms × reps 3), which is stopped on MiniMax Token Plan quota exhaustion. No bench numbers are claimed in this release.
+
 ## [0.5.7] - 2026-11-08
 
 ### Added

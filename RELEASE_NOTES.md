@@ -1,5 +1,15 @@
 # Release Notes
 
+## 0.5.8 - README command reference; CI actions to v7
+
+Patch release. One docs addition and one CI maintenance bump since 0.5.7, both verified by the full test suite.
+
+**README Commands section (#54).** README now has a single command reference after "3 Minute Start": all 31 top-level xflow commands with a one-line description each, verified against live `--help` output, and an explicit note that the installed binary is `xflow` (there is no `evalid` binary). Docs only — no CLI behaviour changed. Test evidence: `npm test` 373 tests / 372 pass / 0 fail / 1 skipped.
+
+**CI actions bumped to v7 (#55).** `actions/checkout` v4 → v7.0.1 and `actions/setup-node` v4 → v7.1.0 across both workflows (4 pin sites). Both v7 actions run on node24, clearing the Node 20 deprecation warnings CI reported under v4. No behaviour change for this repo: the fork-PR guard in checkout v7 does not apply to this repo's trigger events, and setup-node v7's removal of the dummy NODE_AUTH_TOKEN export does not affect the OIDC Trusted Publishing flow in npm-publish.yml. Test evidence: `npm run verify` exit 0 on the merged tree.
+
+Acceptance debt, stated plainly: the bench-number acceptance for P1-2, P1-3, P2-1 and P2-3 — the wall-clock/token/resolved lines from issue #5 — still awaits the MiniMax full-matrix batch (15 instances × 4 arms × reps 3), which is stopped on MiniMax Token Plan quota exhaustion. No bench numbers are claimed in this release.
+
 ## 0.5.7 - Coverage config (c8)
 
 Patch release. One addition since 0.5.6, verified by the full test suite.
