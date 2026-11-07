@@ -149,6 +149,46 @@ node bin/xflow.js compare codex-goal
 node bin/xflow.js launch copy
 ```
 
+## Commands
+
+The installed binary is `xflow` (`npm install -g evalid` installs the `xflow` CLI). Every
+top-level command below was verified against `xflow <command> --help` at v0.5.7; run
+`xflow --help` for the full list with examples, or `xflow <command> --help` for one command.
+
+| Command | What it does |
+| --- | --- |
+| `xflow workflow run \| validate <yaml>` | Run a workflow (`yolo` / `corps` / a YAML path), or validate its YAML as preflight |
+| `xflow corps` | Run the heavy product/multi-agent workflow through its governed entry point |
+| `xflow proof` | Verify workflow completion evidence and write the proof file |
+| `xflow doctor` | Check local xflow readiness: package scripts, workflow YAMLs, skill topology |
+| `xflow init` | Create project-local `.as-xflow/config.json` with portable defaults |
+| `xflow goal show \| set \| audit \| clear` | Manage the project-level `.xflow/GOAL.md` anchor |
+| `xflow profile show \| set` | Manage the personal/team execution profile |
+| `xflow policy validate` | Validate the effective policy overlay |
+| `xflow intake recommend` | Recommend a workflow track and gate overlays from a demand profile |
+| `xflow evaluate` | One-shot external evaluator brief: quality score, blockers, next actions |
+| `xflow release status` | Release-owner publish status: current blocker, package evidence, next action |
+| `xflow assess` | Public quality assessment for goal, yolo, corps and the skill family |
+| `xflow demo launch \| clean` | Show launch demo paths, or run the clean-project adoption smoke |
+| `xflow launch audit \| dossier \| claims \| copy` | Audit launch readiness, or print the dossier, claimable statements, or safe launch copy |
+| `xflow adoption validate \| init \| kit \| trial \| brief \| status` | Validate real adoption evidence records, or guide an external trial |
+| `xflow package audit \| preflight \| status` | Validate npm package evidence; preflight checks publish prerequisites without publishing |
+| `xflow score` | Print the competitive readiness score |
+| `xflow objective` | Audit the top-level product objective against proof from source checkout |
+| `xflow compare <system>` | Evidence-backed comparison against `superpowers`, `codex-goal`, `super-assistant`, `openspec`, `gstack`, or `spec-kit` |
+| `xflow adapter import-file` | Import a generic tracker item JSON into `specs/changes/<change-id>/` |
+| `xflow spec start \| delta \| openspec-map` | Scaffold specs, generate a spec delta review, or map an OpenSpec layout |
+| `xflow qa capture \| review \| ship \| benchmark` | Browser-QA capture with QA-focused defaults, packaged as review, ship-gate, or benchmark |
+| `xflow host status \| sync \| diff` | Show or maintain installed xflow skill copies across host roots |
+| `xflow coach <topic>` | Concise execution checklist (`bugfix`, `feature`, `review`, `qa`, `ship`, `tdd`, `debug`, `red`, `green`, `verify`) |
+| `xflow role <role>` | Named specialist operator surface (`developer`, `reviewer`, `qa`, `release`, `product`) |
+| `xflow visual capture-page-evidence \| export-dom-rects \| export-visual-tokens \| diff-images \| render-report` | Screenshot/DOM capture and visual-token / image-diff tooling |
+| `xflow quickstart` | Copy-paste-safe first-run commands |
+| `xflow guide` | The human-facing delivery loop in one screen |
+| `xflow gate ack <phase>` | Approve a pending human gate so a run can resume |
+| `xflow atom list \| show \| run` | List, inspect, or run a single registered atom directly |
+| `xflow serve` | Start the HTTP control plane for heavy-track workflows |
+
 ## Run a change
 
 ```bash
