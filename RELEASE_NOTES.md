@@ -1,5 +1,15 @@
 # Release Notes
 
+## 0.5.6 - Playwright 1.65.0; js-yaml 5.5.0
+
+Patch release. Two dependency upgrades since 0.5.5, both verified by the full test suite (`npm run verify` exit 0 on the merged tree).
+
+**Playwright 1.59.1 → 1.65.0 (#49).** Dev-dependency bump; paired Chromium 158.0.8127.18 (build 1254) verified locally.
+
+**js-yaml 4.1.1 → 5.5.0 (#50).** Major upgrade, verified item by item before merging: both shipped workflows parse deep-equal under v4 and v5, scalar resolution is unchanged, and the one real break — v5 no longer resolves the `<<` merge key — is handled explicitly: the workflow loader now rejects a literal `<<` key with an actionable error telling the author to inline the merged mapping, instead of a confusing schema-validation failure. Pinned by `test/workflow-loader-yaml5.test.js` (7 tests).
+
+Acceptance debt, stated plainly: the bench-number acceptance for P1-2, P1-3, P2-1 and P2-3 — the wall-clock/token/resolved lines from issue #5 — still awaits the MiniMax full-matrix batch (15 instances × 4 arms × reps 3), which is running. No bench numbers are claimed in this release.
+
 ## 0.5.5 - Package entry restored; dead code removed
 
 Patch release. Two small fixes since 0.5.4, both verified by the full test suite (`npm run verify` exit 0 on the merged tree).
