@@ -1,4 +1,5 @@
 node_modules/
+coverage/
 .as-xflow/
 tmp/
 *.pyc

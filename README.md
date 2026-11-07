@@ -304,6 +304,7 @@ evalid aims to complement prompt-level workflow kits and spec tools, not replace
 npm ci
 npx playwright install chromium   # browser-evidence tests
 npm test                          # 270+ tests
+npm run coverage                  # same suite with a c8 coverage report in coverage/
 npm run drift:scan                # docs/skill/workflow drift checks
 npm run pack:check                # what would be published
 ```
