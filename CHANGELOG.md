@@ -5,6 +5,16 @@ All notable changes to this project are documented here. Detailed notes live in
 
 ## [Unreleased]
 
+## [0.5.13] - 2026-11-09
+
+### Added
+- **Proof-seal verification GitHub Action (#71)**: new JavaScript action (`action.yml`, node22) that runs the existing i6b seal validator for one change-id/phase/attempt and exits non-zero unless the seal verifies and the clean replay matches the claim. Inputs: change-id, phase, attempt, project-root, tdd-mode; outputs: ok, verdict. Test evidence: 6 new tests in `test/github-action-verify-proof.test.js` (valid sealed green proof verifies; tampered proof fails with `binding_mismatch`; test drift after the seal fails with `green_tree_mismatch`; missing proof fails with `missing`; CLI entry exit 0/1; action.yml declares inputs and entry) 6/6 pass; RED→GREEN verified (`ERR_MODULE_NOT_FOUND` before the entry existed); PR CI run 42494536803 success.
+
+### Changed
+- **Removed dead phase-run-dispatch atom wrapper (#68)**: `src/agent_team/atoms/phase-run-dispatch.js` had zero callers — repo-wide grep finds only its own definition site, it is absent from `atoms/registry.json` and from the public `src/index.js` surface, and registry entry `I2.phase_run.dispatch` points elsewhere. No runtime behaviour changed. Test evidence: local full `npm test` 440 tests / 439 pass / 0 fail / 1 skipped (pre-existing); PR CI run 42483989723 verify pass.
+
+Acceptance debt, stated plainly: the bench-number acceptance for P1-2 / P1-3 / P2-1 / P2-3 still awaits the MiniMax full-matrix batch (15 instances × 4 arms × reps 3), which is stopped on MiniMax Token Plan quota exhaustion. No bench numbers are claimed in this release.
+
 ## [0.5.12] - 2026-11-08
 
 ### Added

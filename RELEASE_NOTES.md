@@ -1,5 +1,15 @@
 # Release Notes
 
+## 0.5.13 - Proof-seal verification action
+
+Patch release. One new feature and one dead-code removal since 0.5.12, both verified by the test suite.
+
+**Proof-seal verification GitHub Action (#71).** A new JavaScript GitHub Action (`action.yml`, node22) runs the existing i6b seal validator for one change-id/phase/attempt and fails the check unless the seal verifies and the clean replay matches the claim, so a replay mismatch can no longer pass CI silently. Test evidence: 6 new tests in `test/github-action-verify-proof.test.js` 6/6 pass (valid sealed green proof verifies; tampered proof fails with `binding_mismatch`; test drift after the seal fails with `green_tree_mismatch`; missing proof fails with `missing`; CLI entry exit 0/1; action.yml declares inputs and entry); RED→GREEN verified; PR CI run 42494536803 success.
+
+**Removed dead phase-run-dispatch atom wrapper (#68).** `src/agent_team/atoms/phase-run-dispatch.js` had zero callers and is absent from the atom registry and the public surface, so the wrapper is gone with no behaviour change. Test evidence: local full `npm test` 440 tests / 439 pass / 0 fail / 1 skipped (pre-existing); PR CI run 42483989723 verify pass.
+
+Acceptance debt, stated plainly: the bench-number acceptance for P1-2, P1-3, P2-1 and P2-3 — the wall-clock/token/resolved lines from issue #5 — still awaits the MiniMax full-matrix batch (15 instances × 4 arms × reps 3), which is stopped on MiniMax Token Plan quota exhaustion. No bench numbers are claimed in this release.
+
 ## 0.5.12 - Policy resolve atom test coverage
 
 Patch release. One test-coverage addition since 0.5.11, verified by the full test suite. No runtime behaviour changed.
