@@ -5,6 +5,14 @@ All notable changes to this project are documented here. Detailed notes live in
 
 ## [Unreleased]
 
+## [0.5.11] - 2026-11-08
+
+### Added
+- **Codex app bridge atom coverage (#63)**: `src/agent_team/atoms/codex-app-bridge.js` (I5 `codex.app_bridge`) was at 0% coverage. Added 6 tests to `test/heavy-atoms.test.js` covering the default local-bridge placeholder return, input.phase preference over context.phase.id, empty-string and missing-phase fallbacks, and registry wiring. Test evidence: RED→GREEN (stubbed-throwing implementation failed all 6 new tests, then green after restore); `npm run coverage` 424 pass / 0 fail; coverage after: codex-app-bridge 100% (all four measures, was 0% before).
+- **Visual layout competition atom coverage (#64)**: `src/agent_team/atoms/visual/layout-competition.js` (H3b `visual.layout_competition`) was at 0% coverage. Added 4 tests to `test/heavy-atoms.test.js` covering `layout_competition.json` writing with the fixed phase and summary (verdict accept / confidence 0.76, two findings), the fixed phase winning over input/context phase names, the missing-change_id error, and registry wiring. Test evidence: RED→GREEN (an intentionally wrong assertion failed, then green after restore); `node test/heavy-atoms.test.js` 64 pass / 0 fail; `npm run coverage` 429 tests / 428 pass / 0 fail / 1 skipped (pre-existing); coverage after: layout-competition 100 / 100 / 100 / 100 (was 0% before).
+
+Acceptance debt, stated plainly: the bench-number acceptance for P1-2 / P1-3 / P2-1 / P2-3 still awaits the MiniMax full-matrix batch (15 instances × 4 arms × reps 3), which is stopped on MiniMax Token Plan quota exhaustion. No bench numbers are claimed in this release.
+
 ## [0.5.10] - 2026-11-08
 
 ### Added
