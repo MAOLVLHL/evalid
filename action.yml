@@ -1,0 +1,30 @@
+name: 'evalid proof check'
+description: 'Verify an evalid TDD proof seal in CI; fails the check when the seal or the clean replay does not match the claim.'
+inputs:
+  change-id:
+    description: 'Change id whose proof seal to verify (specs/changes/<id>/tdd/<phase>-<attempt>.json).'
+    required: true
+  phase:
+    description: 'Proof phase to verify (red, green, refactor, run).'
+    required: false
+    default: 'green'
+  attempt:
+    description: 'Proof attempt number.'
+    required: false
+    default: '0'
+  project-root:
+    description: 'Project root containing the proof files.'
+    required: false
+    default: '.'
+  tdd-mode:
+    description: 'TDD mode override (red-green | refactor | docs). Empty means auto-detect from status.json.'
+    required: false
+    default: ''
+outputs:
+  ok:
+    description: 'true when the proof seal verifies and the replay matches the claim.'
+  verdict:
+    description: 'Validator verdict (valid, binding_mismatch, missing, snapshot_mismatch, reexec_exit_mismatch, green_tree_mismatch, ...).'
+runs:
+  using: 'node22'
+  main: 'action/verify-proof.mjs'
