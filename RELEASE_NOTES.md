@@ -1,5 +1,15 @@
 # Release Notes
 
+## 0.5.15 - xflow audit standalone mode (milestone M2 accepted)
+
+Patch release. One new feature since 0.5.14, verified end to end in CI and locally.
+
+**`xflow audit` standalone mode (#79).** Verify any git diff / PR without adopting evalid workflows: `xflow audit --pr <n>` extracts the test runs the change claims to have passed, replays each one in a clean clone at the change's head, and compares exit codes and pass/fail counts against the claim; diffs carrying an evalid proof seal are replayed through the existing i6b validator. Test evidence: 11 new tests in `test/xflow-audit.test.js` 11/11 pass; local full `npm test` 475 tests / 474 pass / 0 fail / 1 skipped (pre-existing); PR CI runs ledger 42516967938 and verify 42516967984 both success.
+
+**Milestone M2 "`xflow audit` standalone mode" — accepted.** Evidence in issue #78, comment 6726208145: audits of real historical PRs #75 / #71 / #68 all `verified` — #75 targeted run 24 passed / 0 failed / 24 total plus seal `valid`, full `npm test` exit 0 on all three; #68's claimed 439/0/440 honestly counts-unparsed (the multi-file runner has no single total, so the verdict rests on exit code).
+
+Acceptance debt, stated plainly: the bench-number acceptance for P1-2, P1-3, P2-1 and P2-3 — the wall-clock/token/resolved lines from issue #5 — still awaits the MiniMax full-matrix batch (15 instances × 4 arms × reps 3), which is stopped on MiniMax Token Plan quota exhaustion. No bench numbers are claimed in this release. Audit gaps carried forward: no PR from a different repo or a non-evalid agent audited yet; pytest / go test / cargo test replay paths are parser-level only.
+
 ## 0.5.14 - PR comment ledger (milestone M1 accepted)
 
 Patch release. One new feature since 0.5.13, verified end to end in CI and locally.
