@@ -5,6 +5,15 @@ All notable changes to this project are documented here. Detailed notes live in
 
 ## [Unreleased]
 
+## [0.5.14] - 2026-11-09
+
+### Added
+- **PR comment ledger (#75)**: the proof-ledger workflow now posts the claim-vs-evidence ledger as a PR comment (`action/ledger-comment.mjs`, `.github/workflows/proof-ledger.yml`). A green proof gets a ✅ comment naming the verified change; a tampered proof fails the `ledger` check and gets a ❌ comment naming the exact break point, so a replay mismatch can no longer pass CI silently. Test evidence: 18 new tests in `test/github-action-ledger-comment.test.js` 18/18 pass; local full `npm test` 464 tests / 463 pass / 0 fail / 1 skipped (pre-existing); PR CI run 42505482112 success.
+
+Milestone M1 "GitHub Action end-to-end" acceptance evidence (issue #73, comment 6724800077): ① green path — PR #75 merged af88e2da, proof-ledger run 42505482067 success, ✅ ledger comment 6724656930; ② red path — demo PR #76 (closed unmerged by plan) turned the `ledger` check red (run 42505769769) and the ❌ comment 6724768829 names the break point `green_tree_mismatch: test/demo-tamper.test.js`; ③ CI replay and local replay agree on both verdicts (`valid` green, `green_tree_mismatch` tampered) through the same validator entry.
+
+Acceptance debt, stated plainly: the bench-number acceptance for P1-2 / P1-3 / P2-1 / P2-3 still awaits the MiniMax full-matrix batch (15 instances × 4 arms × reps 3), which is stopped on MiniMax Token Plan quota exhaustion. No bench numbers are claimed in this release.
+
 ## [0.5.13] - 2026-11-09
 
 ### Added
