@@ -7,6 +7,7 @@
  *   workflow validate <yaml>     Validate workflow YAML against schema
  *   corps                        Run the heavy corps workflow through its governed entry
  *   proof                        Verify workflow completion evidence and write proof
+ *   audit                        Audit any git diff / PR: replay claimed test runs, verdict
  *   doctor                       Check local xflow readiness
  *   evaluate                     Show one-shot external evaluator brief
  *   release status               Show release-owner publish status
@@ -40,6 +41,7 @@ import { spawnSync } from 'child_process';
 import { createHash } from 'crypto';
 import { tmpdir } from 'os';
 import { ackPendingGate } from '../src/core/pending-gates.js';
+import { runAudit, renderAuditReport } from '../src/core/audit.js';
 import { exportDomRectsToFile, resolveCliPath } from '../src/agent_team/atoms/visual/dom-rect-export.js';
 import { capturePageEvidence } from '../src/agent_team/atoms/visual/page-evidence-capture.js';
 import { computeImageDiffMetrics } from '../src/agent_team/atoms/visual/image-diff.js';
@@ -82,6 +84,9 @@ async function main() {
       break;
     case 'proof':
       await handleProof([subcommand, ...rest].filter(Boolean));
+      break;
+    case 'audit':
+      await handleAudit([subcommand, ...rest].filter(Boolean));
       break;
     case 'gate':
       await handleGate(subcommand, rest);
@@ -5742,6 +5747,77 @@ async function handleProof(args) {
   if (!proof.ok) process.exit(1);
 }
 
+// ─── audit ───────────────────────────────────────────────────────────────────
+// Standalone audit (M2, #78): verify any git diff / PR without adopting
+// evalid workflows. Claims are extracted from the PR body / claims text,
+// replayed in a clean clone at the PR head, and compared against the claim;
+// diffs carrying an evalid proof seal are replayed through the i6b validator
+// (see src/core/audit.js).
+async function handleAudit(args) {
+  if (args.some(isHelpRequest)) {
+    printAuditHelp();
+    return;
+  }
+  const parsedArgs = parseCliArgs(args);
+  const repoDir = resolve(parsedArgs.repo || process.cwd());
+  const timeoutMs = parsedArgs.timeout ? Number(parsedArgs.timeout) * 1000 : 300000;
+  let diffText = '';
+  let claimsText = '';
+  let baseRef = parsedArgs.base || null;
+  let headRef = parsedArgs.head || null;
+
+  if (parsedArgs.pr) {
+    const prNumber = String(parsedArgs.pr);
+    const view = spawnSync('gh', ['pr', 'view', prNumber, '--json', 'body,baseRefOid,mergeCommit,headRefOid'], { cwd: repoDir, encoding: 'utf8' });
+    if (view.status !== 0) {
+      console.error(`xflow audit: gh pr view ${prNumber} failed: ${(view.stderr || view.stdout || '').trim().slice(-300)}`);
+      process.exit(2);
+    }
+    let pr;
+    try {
+      pr = JSON.parse(view.stdout);
+    } catch {
+      console.error('xflow audit: could not parse gh pr view output');
+      process.exit(2);
+    }
+    claimsText = pr.body || '';
+    baseRef = pr.baseRefOid || null;
+    headRef = pr.mergeCommit?.oid || pr.headRefOid || null;
+    const diff = spawnSync('gh', ['pr', 'diff', prNumber], { cwd: repoDir, encoding: 'utf8' });
+    if (diff.status !== 0) {
+      console.error(`xflow audit: gh pr diff ${prNumber} failed: ${(diff.stderr || diff.stdout || '').trim().slice(-300)}`);
+      process.exit(2);
+    }
+    diffText = diff.stdout || '';
+  } else {
+    if (parsedArgs.diff) {
+      diffText = parsedArgs.diff === '-'
+        ? readFileSync(0, 'utf8')
+        : readFileSync(resolve(parsedArgs.diff), 'utf8');
+    }
+    if (parsedArgs.claims) claimsText = String(parsedArgs.claims);
+    if (parsedArgs.claims_file) claimsText = readFileSync(resolve(parsedArgs.claims_file), 'utf8');
+    if (!headRef && !baseRef) {
+      console.error('Usage: xflow audit --pr <n> | --diff <patch> --base <ref> | --base <ref> --head <ref>');
+      process.exit(2);
+    }
+  }
+
+  const report = runAudit({
+    repoDir,
+    diffText,
+    baseRef,
+    headRef,
+    claimsText,
+    timeoutMs,
+    keepWorkdir: Boolean(parsedArgs.keep_workdir),
+  });
+  if (parsedArgs.out) writeFileSync(resolve(parsedArgs.out), `${JSON.stringify(report, null, 2)}\n`);
+  if (parsedArgs.json) console.log(JSON.stringify(report, null, 2));
+  else console.log(renderAuditReport(report));
+  process.exit(report.exitCode);
+}
+
 async function buildWorkflowProof({ track, workflowPath, projectRoot, changeId, write = true }) {
   const { load } = await import('../src/core/workflow-loader.js');
   const { readExecutionLog } = await import('../src/core/execution-log.js');
@@ -6654,6 +6730,37 @@ Options:
 `);
 }
 
+function printAuditHelp() {
+  console.log(`
+Usage: xflow audit --pr <n> [--repo <path>] [--json] [--out <file>]
+       xflow audit --diff <patch|-> --base <ref> [--claims-file <file>] [--json]
+       xflow audit --base <ref> --head <ref> [--claims <text>] [--json]
+
+Audit any git diff / PR without adopting evalid workflows: extract the test
+runs the change claims to have passed, replay each one in a clean clone at
+the change's head, and compare exit codes and pass/fail counts against the
+claim. Diffs carrying an evalid proof seal are replayed through the existing
+i6b seal validator. No seal semantics, CLI name, or bin path changes.
+
+Verdicts / exit codes: verified 0, mismatch 1, unverifiable 1, misuse 2,
+no_claims 3 (no test claims found in the supplied text).
+
+Options:
+  --pr N              Audit a GitHub PR (body = claims, merge commit = head)
+  --diff FILE         Unified diff to apply on top of --base ('-' reads stdin)
+  --base REF          Base commit for --diff, or diff base for --head
+  --head REF          Head commit to check out directly (diff not applied)
+  --repo PATH         Local repo to clone from, default: current directory
+  --claims TEXT       Claims text (default: PR body for --pr)
+  --claims-file FILE  Read claims text from a file
+  --timeout SEC       Per-command replay timeout, default: 300
+  --json              Print the machine-readable report
+  --out FILE          Write the JSON report to a file
+  --keep-workdir      Keep the scratch clone for debugging
+  help, -h, --help    Show this help message
+`);
+}
+
 function printProofHelp() {
   console.log(`
 Usage: xflow proof [--track corps] --change-id <id> [--project-root <path>]
@@ -7148,6 +7255,7 @@ Usage:
   xflow workflow validate <yaml> Validate workflow YAML
   xflow corps --title <title>    Run heavy track through governed entry
   xflow proof --track corps      Verify final execution proof
+  xflow audit --pr 75 [--json]   Audit a PR: replay its claimed test runs
   xflow doctor [--json]          Check local xflow readiness
   xflow init [--project-root .]   Create project-local xflow config
   xflow goal set "<goal>"        Write the project-level .xflow/GOAL.md anchor

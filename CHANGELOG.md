@@ -5,6 +5,9 @@ All notable changes to this project are documented here. Detailed notes live in
 
 ## [Unreleased]
 
+### Added
+- **`xflow audit` standalone mode (#78, M2)**: verify any git diff / PR without adopting evalid workflows — `xflow audit --pr <n>` / `--diff <patch> --base <ref>` / `--base <ref> --head <ref>` extracts the test runs the change claims to have passed (English and Chinese claim phrasing, per-file counts summed for multi-file commands, clause-split so one line's two claims don't leak onto each other), replays each in a clean clone at the change's head (deps installed with `npm ci` in the scratch copy, `NODE_TEST_*` env stripped so a nested `node --test` really runs), and compares exit codes and pass/fail counts against the claim. Diffs carrying an evalid proof seal are replayed through the existing i6b validator (seal semantics untouched). Verdicts: `verified` / `mismatch` / `no_claims` / `unverifiable` (exit 0/1/3/1). Test evidence: 11 new tests in `test/xflow-audit.test.js` (claim extraction incl. #75/#68 bodies, diff/seal parsing, replay-count parsing, fixture-repo verified/mismatch/no_claims end-to-end) 11/11 pass. M2 acceptance: audits of real historical PRs #75 / #71 / #68 all `verified` (targeted 24/24 + seal `valid` on #75; full `npm test` exit 0 on all three; #68's claimed 439/0/440 honestly counts-unparsed — multi-file runner has no single total), evidence in #78 comment 6726208145.
+
 ## [0.5.14] - 2026-11-09
 
 ### Added

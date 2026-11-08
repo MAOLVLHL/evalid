@@ -210,6 +210,27 @@ This repo dogfoods the Action on its own PRs via
 added or changed by the PR (`specs/changes/*/tdd/*.json`) and verifies
 each one.
 
+## `xflow audit`: verify any PR, no evalid workflow required
+
+`xflow audit` checks a change you did *not* produce with evalid: point it
+at any git diff or PR — Claude Code, Codex, or any other agent's output —
+and it extracts the test runs the change claims to have passed, replays
+each one in a clean clone at the change's head, and compares exit codes
+and pass/fail counts against the claim. If the diff carries an evalid
+proof seal, the seal is replayed through the existing i6b validator.
+
+```bash
+xflow audit --pr 75                        # audit a GitHub PR (body = claims)
+xflow audit --diff change.patch --base HEAD~1 --claims-file claims.txt
+xflow audit --base main --head feature/x --claims "npm test: exit 0"
+```
+
+Verdicts: `verified` (every claim replayed as claimed), `mismatch` (a
+replay contradicts a claim, or a seal is invalid), `no_claims` (no test
+claims found in the supplied text), `unverifiable` (a claimed command
+could not run). Exit codes are 0 / 1 / 3 / 1 respectively (2 = misuse).
+`--json` prints the machine-readable report; `--out <file>` writes it.
+
 ## Commands
 
 The installed binary is `xflow` (`npm install -g evalid` installs the `xflow` CLI). Every
@@ -221,6 +242,7 @@ top-level command below was verified against `xflow <command> --help` at v0.5.7;
 | `xflow workflow run \| validate <yaml>` | Run a workflow (`yolo` / `corps` / a YAML path), or validate its YAML as preflight |
 | `xflow corps` | Run the heavy product/multi-agent workflow through its governed entry point |
 | `xflow proof` | Verify workflow completion evidence and write the proof file |
+| `xflow audit` | Audit any git diff / PR: replay claimed test runs, verdict |
 | `xflow doctor` | Check local xflow readiness: package scripts, workflow YAMLs, skill topology |
 | `xflow init` | Create project-local `.as-xflow/config.json` with portable defaults |
 | `xflow goal show \| set \| audit \| clear` | Manage the project-level `.xflow/GOAL.md` anchor |
