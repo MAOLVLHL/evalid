@@ -1,5 +1,15 @@
 # Release Notes
 
+## 0.5.10 - Intake and phase-run fail atoms test coverage
+
+Patch release. Two test-coverage additions since 0.5.9, both verified by the full test suite. No runtime behaviour changed.
+
+**Intake atoms coverage (#60).** G1 `intake.preview_or_refine` and G5 `intake.recommend` now have 8 tests in `test/intake-atoms.test.js`, covering intake preview/refine file writing, summary title fallback, change_id handling, workflow recommendation (yolo for docs, corps with a human checkpoint for payments) and registry wiring. Coverage went from 0% to 100% on both files (19/19 and 20/20); all-files statements 86.78% → 86.97%. Test evidence: new file 8/8 pass; full suite green on the merged tree.
+
+**Phase-run fail atom coverage (#61).** D3d `phase_run.fail` (`src/core/atoms/phase-run/fail.js`) now has 7 tests in `test/heavy-atoms.test.js`, covering the success path, session resolution (explicit id, runtime id, most recent running session), stop_reason fallback, custom store via `data_file`, and both error paths. Coverage went from 0% to 100% statements / 94.44% branches / 100% functions / 100% lines. Test evidence: RED→GREEN verified; `node test/heavy-atoms.test.js` 54 pass / 0 fail.
+
+Acceptance debt, stated plainly: the bench-number acceptance for P1-2, P1-3, P2-1 and P2-3 — the wall-clock/token/resolved lines from issue #5 — still awaits the MiniMax full-matrix batch (15 instances × 4 arms × reps 3), which is stopped on MiniMax Token Plan quota exhaustion. No bench numbers are claimed in this release.
+
 ## 0.5.9 - Design and memory atoms test coverage
 
 Patch release. Two test-coverage additions since 0.5.8, both verified by the full test suite. No runtime behaviour changed.

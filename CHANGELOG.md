@@ -5,6 +5,14 @@ All notable changes to this project are documented here. Detailed notes live in
 
 ## [Unreleased]
 
+## [0.5.10] - 2026-11-08
+
+### Added
+- **Intake atoms coverage (#60)**: `src/core/atoms/intake/preview-or-refine.js` (G1 `intake.preview_or_refine`) and `src/core/atoms/intake/recommend.js` (G5 `intake.recommend`) were at 0% coverage. Added `test/intake-atoms.test.js` (8 tests) covering intake preview/refine file writing with mode/summary/answers/constraints, context title fallback for the summary, change_id from input, the missing-change_id error, workflow recommendation (yolo for docs with no coverage gate, corps with a human checkpoint for payments) plus `workflow_recommendation.json` / `policy_effective.json` writing, and registry wiring for both atoms. Test evidence: new file 8/8 pass; full suite green on the merged tree; coverage after: preview-or-refine 100% (19/19), recommend 100% (20/20) (both were 0% before); all-files statements 86.78% → 86.97%.
+- **Phase-run fail atom coverage (#61)**: `src/core/atoms/phase-run/fail.js` (D3d `phase_run.fail`, ~40 lines of failure-path state machine) was at 0% coverage. Added 7 tests to `test/heavy-atoms.test.js` alongside the existing D3 lifecycle tests, covering the success path (explicit session_id + summary + detail, session marked failed with stop_reason and failure persisted), resolving the most recent running session without a session_id, session_id from `context.runtime.phaseRunSessionId`, stop_reason fallback and the default `phase_run_failed` summary, an explicit `data_file` custom store, and the two error paths (missing mission, no session for the mission). Test evidence: RED→GREEN (stubbed-throwing implementation failed all 6 initial tests, then green after restore); `node test/heavy-atoms.test.js` 54 pass / 0 fail; coverage after: fail.js 100% statements / 94.44% branches / 100% functions / 100% lines (was 0% on all four; the single uncovered branch is the `process.cwd()` fallback, untested by design to avoid polluting the repo state).
+
+Acceptance debt, stated plainly: the bench-number acceptance for P1-2 / P1-3 / P2-1 / P2-3 still awaits the MiniMax full-matrix batch (15 instances × 4 arms × reps 3), which is stopped on MiniMax Token Plan quota exhaustion. No bench numbers are claimed in this release.
+
 ## [0.5.9] - 2026-11-08
 
 ### Added
