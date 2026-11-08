@@ -5,6 +5,8 @@ import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 
+import { policyResolve } from '../src/core/atoms/policy/resolve.js';
+import registry from '../atoms/registry.json' with { type: 'json' };
 import {
   mergePolicy,
   readProfile,
@@ -126,6 +128,116 @@ describe('policy overlay', () => {
       'coding.min_changed_line_coverage must be a number between 0 and 100',
       'review.min_reviewers must be a non-negative number',
     ]);
+  });
+});
+
+describe('P1.policy.resolve atom', () => {
+  test('resolves personal defaults and writes policy_effective.json for a context change id', async () => {
+    const projectRoot = makeProjectRoot();
+    try {
+      const result = await policyResolve({}, { projectRoot, changeId: 'chg-policy-1' });
+
+      assert.equal(result.ok, true);
+      assert.equal(result.policy.execution_mode, 'personal');
+      assert.equal(result.policy.authority, 'policy_overlay_only_workflows_remain_yolo_corps');
+      assert.equal(
+        result.policy_effective_file,
+        resolve(projectRoot, 'specs', 'changes', 'chg-policy-1', 'policy_effective.json'),
+      );
+      assert.ok(existsSync(result.policy_effective_file));
+      assert.equal(readJson(result.policy_effective_file).execution_mode, 'personal');
+    } finally {
+      cleanupProjectRoot(projectRoot);
+    }
+  });
+
+  test('takes change id from input and execution mode override from input', async () => {
+    const projectRoot = makeProjectRoot();
+    try {
+      writeFileSync(resolve(projectRoot, '.xflow', 'profile.json'), JSON.stringify({
+        execution_mode: 'personal',
+        coding: { min_changed_line_coverage: 60 },
+      }, null, 2));
+      writeFileSync(resolve(projectRoot, '.xflow', 'team-policy.json'), JSON.stringify({
+        coding: { min_changed_line_coverage: 85 },
+        review: { min_reviewers: 2 },
+      }, null, 2));
+
+      const result = await policyResolve(
+        { change_id: 'chg-policy-1', execution_mode: 'team' },
+        { projectRoot },
+      );
+
+      assert.equal(result.ok, true);
+      assert.equal(result.policy.execution_mode, 'team');
+      assert.equal(result.policy.coding.min_changed_line_coverage, 85);
+      assert.equal(result.policy.review.min_reviewers, 2);
+      assert.ok(existsSync(resolve(projectRoot, 'specs', 'changes', 'chg-policy-1', 'policy_effective.json')));
+    } finally {
+      cleanupProjectRoot(projectRoot);
+    }
+  });
+
+  test('passes team_policy_missing through when team mode has no team policy', async () => {
+    const projectRoot = makeProjectRoot();
+    try {
+      writeFileSync(resolve(projectRoot, '.xflow', 'profile.json'), JSON.stringify({
+        execution_mode: 'team',
+      }, null, 2));
+
+      const result = await policyResolve({}, { projectRoot, changeId: 'chg-policy-1' });
+
+      assert.equal(result.ok, false);
+      assert.equal(result.error.code, 'team_policy_missing');
+      assert.equal(result.policy, null);
+    } finally {
+      cleanupProjectRoot(projectRoot);
+    }
+  });
+
+  test('passes team_policy_invalid through for an invalid team policy', async () => {
+    const projectRoot = makeProjectRoot();
+    try {
+      writeFileSync(resolve(projectRoot, '.xflow', 'profile.json'), JSON.stringify({
+        execution_mode: 'team',
+      }, null, 2));
+      writeFileSync(resolve(projectRoot, '.xflow', 'team-policy.json'), JSON.stringify({
+        coding: { min_changed_line_coverage: 'high' },
+      }, null, 2));
+
+      const result = await policyResolve({}, { projectRoot, changeId: 'chg-policy-1' });
+
+      assert.equal(result.ok, false);
+      assert.equal(result.error.code, 'team_policy_invalid');
+      assert.deepEqual(result.error.errors, [
+        'coding.min_changed_line_coverage must be a number between 0 and 100',
+      ]);
+    } finally {
+      cleanupProjectRoot(projectRoot);
+    }
+  });
+
+  test('writes no artifact when neither context nor input supplies a change id', async () => {
+    const projectRoot = makeProjectRoot();
+    try {
+      const result = await policyResolve({}, { projectRoot });
+
+      assert.equal(result.ok, true);
+      assert.equal(result.policy.execution_mode, 'personal');
+      assert.equal(result.policy_effective_file, undefined);
+      assert.equal(existsSync(resolve(projectRoot, 'specs', 'changes', 'chg-policy-1', 'policy_effective.json')), false);
+    } finally {
+      cleanupProjectRoot(projectRoot);
+    }
+  });
+
+  test('registry entry P1.policy.resolve resolves to this implementation', async () => {
+    const entry = registry.atoms['P1.policy.resolve'];
+
+    assert.equal(entry.module, 'src/core/atoms/policy/resolve.js');
+    assert.equal(entry.export, 'policyResolve');
+    const loaded = await import(new URL(`../${entry.module}`, import.meta.url));
+    assert.equal(loaded[entry.export], policyResolve);
   });
 });
 
