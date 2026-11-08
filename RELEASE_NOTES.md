@@ -1,5 +1,15 @@
 # Release Notes
 
+## 0.5.9 - Design and memory atoms test coverage
+
+Patch release. Two test-coverage additions since 0.5.8, both verified by the full test suite. No runtime behaviour changed.
+
+**Design atoms coverage (#57).** H2b/H2d/H2e design atoms (competitor reconstruction review, reference surface lock, reconstruction pack) now have 10 tests in `test/design-atoms.test.js`, covering contract freezing, primary-surface selection, non-array input handling, lock-file writing and pack building.
+
+**Memory atoms coverage (#58).** `src/core/memory-state.js` and the `memory/manage` and `memory/mount` atoms now have 21 tests in `test/memory-atoms.test.js`, covering create/list/mount/resolve defaults and filters, mission resolution via input, runtime and bindings file, and manage/mount against a temp-dir sqlite store. Coverage went from 0% to 100/100/100/100 on all three files. Test evidence: `npm run coverage` 404 tests / 403 pass / 0 fail / 1 skipped (pre-existing).
+
+Acceptance debt, stated plainly: the bench-number acceptance for P1-2, P1-3, P2-1 and P2-3 — the wall-clock/token/resolved lines from issue #5 — still awaits the MiniMax full-matrix batch (15 instances × 4 arms × reps 3), which is stopped on MiniMax Token Plan quota exhaustion. No bench numbers are claimed in this release.
+
 ## 0.5.8 - README command reference; CI actions to v7
 
 Patch release. One docs addition and one CI maintenance bump since 0.5.7, both verified by the full test suite.

@@ -5,6 +5,14 @@ All notable changes to this project are documented here. Detailed notes live in
 
 ## [Unreleased]
 
+## [0.5.9] - 2026-11-08
+
+### Added
+- **Design atoms coverage (#57)**: `src/agent_team/atoms/design/` H2b/H2d/H2e atoms (competitor reconstruction review, reference surface lock, reconstruction pack) had no tests. Added `test/design-atoms.test.js` (10 tests) covering contract freezing, primary-surface selection, non-array input handling, lock-file writing and pack building. Test evidence: full suite green on the merged tree.
+- **Memory atoms coverage (#58)**: `src/core/memory-state.js` and `src/core/atoms/memory/manage.js` / `mount.js` were at 0% coverage. Added `test/memory-atoms.test.js` (21 tests) covering create/list/mount/resolve defaults and filters, mission resolution via input, runtime and bindings file, and manage/mount against a temp-dir sqlite store (the `process.cwd()` fallback is exercised via `AS_XFLOW_DATA_FILE` pointed at a temp path, so no workspace pollution). No implementation changes: two initially failing expectations were test-side misreadings of `ensureArray` (truthy non-array values are wrapped, not reset). Test evidence: `npm run coverage` 404 tests / 403 pass / 0 fail / 1 skipped (pre-existing); coverage after: memory-state 100/100/100/100, manage 100/100/100/100, mount 100/100/100/100 (all three were 0% before); all-files statements 86.28% → 86.78%.
+
+Acceptance debt, stated plainly: the bench-number acceptance for P1-2 / P1-3 / P2-1 / P2-3 still awaits the MiniMax full-matrix batch (15 instances × 4 arms × reps 3), which is stopped on MiniMax Token Plan quota exhaustion. No bench numbers are claimed in this release.
+
 ## [0.5.8] - 2026-11-08
 
 ### Added
