@@ -24,6 +24,7 @@ import { visualDirectionSynthesis } from '../src/agent_team/atoms/visual/directi
 import { visualBenchmark } from '../src/agent_team/atoms/visual/benchmark.js';
 import { benchmarkRepairPlan } from '../src/agent_team/atoms/visual/benchmark-repair-plan.js';
 import { visualAestheticReview } from '../src/agent_team/atoms/visual/aesthetic-review.js';
+import { codexAppBridge } from '../src/agent_team/atoms/codex-app-bridge.js';
 import { generationContract } from '../src/agent_team/atoms/design/generation-contract.js';
 import { artifactVerify } from '../src/core/atoms/gate/artifact-verify.js';
 import { readStore } from '../src/core/state-store.js';
@@ -3073,5 +3074,55 @@ describe('Heavy atoms', { concurrency: false }, () => {
     } finally {
       cleanupProjectRoot(projectRoot);
     }
+  });
+});
+
+describe('I5 codex app bridge', () => {
+  test('returns the local bridge placeholder with no phase by default', async () => {
+    const result = await codexAppBridge();
+
+    assert.equal(result.ok, true);
+    assert.equal(result.bridge, 'local-codex');
+    assert.equal(result.phase, null);
+    assert.equal(result.message, 'Codex app bridge placeholder completed locally.');
+  });
+
+  test('prefers input.phase over context.phase.id', async () => {
+    const result = await codexAppBridge(
+      { phase: 'execute' },
+      { phase: { id: 'review' } },
+    );
+
+    assert.equal(result.phase, 'execute');
+    assert.equal(result.ok, true);
+    assert.equal(result.bridge, 'local-codex');
+  });
+
+  test('falls back to context.phase.id when input.phase is absent', async () => {
+    const result = await codexAppBridge({}, { phase: { id: 'review' } });
+
+    assert.equal(result.phase, 'review');
+  });
+
+  test('falls back to context.phase.id when input.phase is an empty string', async () => {
+    const result = await codexAppBridge({ phase: '' }, { phase: { id: 'review' } });
+
+    assert.equal(result.phase, 'review');
+  });
+
+  test('returns null phase when context has no phase object', async () => {
+    const result = await codexAppBridge({ phase: undefined }, {});
+
+    assert.equal(result.phase, null);
+    assert.equal(result.ok, true);
+  });
+
+  test('registry entry I5.codex.app_bridge resolves to this implementation', async () => {
+    const entry = registry.atoms['I5.codex.app_bridge'];
+
+    assert.equal(entry.module, 'src/agent_team/atoms/codex-app-bridge.js');
+    assert.equal(entry.export, 'codexAppBridge');
+    const loaded = await import(new URL(`../${entry.module}`, import.meta.url));
+    assert.equal(loaded[entry.export], codexAppBridge);
   });
 });
