@@ -22,6 +22,7 @@ import { visualReview } from '../src/agent_team/atoms/visual/review.js';
 import visualReviewAggregate from '../src/agent_team/atoms/visual/review-aggregate.js';
 import { visualDirectionSynthesis } from '../src/agent_team/atoms/visual/direction-synthesis.js';
 import { visualBenchmark } from '../src/agent_team/atoms/visual/benchmark.js';
+import { visualLayoutCompetition } from '../src/agent_team/atoms/visual/layout-competition.js';
 import { benchmarkRepairPlan } from '../src/agent_team/atoms/visual/benchmark-repair-plan.js';
 import { visualAestheticReview } from '../src/agent_team/atoms/visual/aesthetic-review.js';
 import { codexAppBridge } from '../src/agent_team/atoms/codex-app-bridge.js';
@@ -3124,5 +3125,96 @@ describe('I5 codex app bridge', () => {
     assert.equal(entry.export, 'codexAppBridge');
     const loaded = await import(new URL(`../${entry.module}`, import.meta.url));
     assert.equal(loaded[entry.export], codexAppBridge);
+  });
+});
+
+describe('H3b visual layout competition', () => {
+  const SUMMARY = 'Competing first-fold layout directions were compared and ranked.';
+
+  test('writes layout_competition.json with the fixed phase and summary', async () => {
+    const projectRoot = makeProjectRoot();
+    const changeId = 'chg-layout-competition';
+    try {
+      const created = await missionCreate(
+        { goal: 'Compare first-fold layouts', workspace: projectRoot },
+        { projectRoot, changeId, runtime: {} },
+      );
+
+      const result = await visualLayoutCompetition({}, {
+        projectRoot,
+        changeId,
+        runtime: { missionId: created.mission_id },
+      });
+
+      assert.equal(result.ok, true);
+      assert.equal(result.mission_id, created.mission_id);
+      assert.equal(
+        result.artifact_file,
+        resolve(projectRoot, 'specs', 'changes', changeId, 'layout_competition.json'),
+      );
+      assert.equal(existsSync(result.artifact_file), true);
+      const artifact = JSON.parse(readFileSync(result.artifact_file, 'utf8'));
+      assert.equal(artifact.version, 1);
+      assert.equal(artifact.phase, 'layout_competition');
+      assert.equal(artifact.change_id, changeId);
+      assert.equal(artifact.summary, SUMMARY);
+      assert.equal(artifact.status, 'completed');
+      assert.equal(artifact.team_run.verdict.status, 'accept');
+      assert.equal(artifact.team_run.verdict.confidence, 0.76);
+      assert.deepEqual(artifact.team_run.findings, [
+        'layout competition output is internally consistent.',
+        'layout competition output is ready for the next workflow transition.',
+      ]);
+      assert.equal(result.payload.phase, 'layout_competition');
+      assert.equal(result.payload.summary, SUMMARY);
+    } finally {
+      cleanupProjectRoot(projectRoot);
+    }
+  });
+
+  test('always uses layout_competition even when input or context names another phase', async () => {
+    const projectRoot = makeProjectRoot();
+    const changeId = 'chg-layout-competition-fixed';
+    try {
+      const created = await missionCreate(
+        { goal: 'Fixed phase wins over input', workspace: projectRoot },
+        { projectRoot, changeId, runtime: {} },
+      );
+
+      const result = await visualLayoutCompetition({ phase: 'review' }, {
+        projectRoot,
+        changeId,
+        phase: { id: 'qa' },
+        runtime: { missionId: created.mission_id },
+      });
+
+      assert.equal(result.payload.phase, 'layout_competition');
+      const artifact = JSON.parse(readFileSync(result.artifact_file, 'utf8'));
+      assert.equal(artifact.phase, 'layout_competition');
+      assert.equal(artifact.summary, SUMMARY);
+    } finally {
+      cleanupProjectRoot(projectRoot);
+    }
+  });
+
+  test('throws when no change_id is provided', async () => {
+    const projectRoot = makeProjectRoot();
+    try {
+      await assert.rejects(
+        () => visualLayoutCompetition({}, { projectRoot, runtime: {} }),
+        /change_id is required/,
+      );
+    } finally {
+      cleanupProjectRoot(projectRoot);
+    }
+  });
+
+  test('registry entry H3b.visual.layout_competition resolves to this implementation', async () => {
+    const entry = registry.atoms['H3b.visual.layout_competition'];
+
+    assert.equal(entry.module, 'src/agent_team/atoms/visual/layout-competition.js');
+    assert.equal(entry.export, 'visualLayoutCompetition');
+    const loaded = await import(new URL(`../${entry.module}`, import.meta.url));
+    assert.equal(loaded[entry.export], visualLayoutCompetition);
   });
 });
