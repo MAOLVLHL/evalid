@@ -149,6 +149,67 @@ node bin/xflow.js compare codex-goal
 node bin/xflow.js launch copy
 ```
 
+## GitHub Action: verify proofs in CI
+
+evalid ships as a GitHub Action (`action.yml` at the repo root). Add it to a
+workflow to verify a sealed TDD proof on every PR: a valid proof keeps the
+check green, a broken seal (or a test edited after the seal) turns it red —
+and the claim-vs-evidence ledger is posted as a PR comment either way, so
+the reviewer sees the claim next to the replay evidence without opening
+the workflow log.
+
+```yaml
+name: Proof ledger
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  ledger:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0  # replay materializes files from the recorded HEAD
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '22'
+      - uses: surlymochan/evalid@main  # or a release tag (see CHANGELOG)
+        with:
+          change-id: my-change
+          phase: green
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+Inputs: `change-id` (required), `phase` (`green`, default), `attempt` (`0`,
+default), `project-root` (`.`, default), `tdd-mode` (auto-detect, default),
+`post-comment` (`true`, default — set `false` to skip the comment),
+`github-token` (defaults to `$GITHUB_TOKEN`), `pr-number` (auto-detects
+from the event payload or ref when empty).
+
+The comment is upserted on a stable marker
+(`<!-- evalid-ledger: <change-id>/<phase>/<attempt> -->`), so re-runs
+update the same comment instead of posting a new one per push. A failed
+comment post never masks the verdict: the step still exits on the proof
+result, and `comment_posted` / `comment_url` are exposed as outputs.
+The check fails (exit 1) on `binding_mismatch`, `snapshot_mismatch`,
+`green_tree_mismatch`, replay mismatches, or a missing proof; the comment
+names the breakage point (for example the test files that drifted after
+the seal).
+
+Local equivalent of the CI replay — same validator, same entry:
+
+```bash
+node action/verify-proof.mjs --project-root . --change-id my-change --phase green
+```
+
+This repo dogfoods the Action on its own PRs via
+`.github/workflows/proof-ledger.yml`: it discovers every sealed proof
+added or changed by the PR (`specs/changes/*/tdd/*.json`) and verifies
+each one.
+
 ## Commands
 
 The installed binary is `xflow` (`npm install -g evalid` installs the `xflow` CLI). Every

@@ -142,21 +142,27 @@ describe('GitHub Action proof verification (issue #70)', () => {
   test('the CLI entry exits 0 on a valid proof and 1 on a missing proof', () => {
     const projectRoot = makeChangeRoot();
     try {
+      // --post-comment false: this test checks exit codes, not posting.
+      // Without it the entry would post a real ledger comment whenever
+      // GITHUB_TOKEN + a PR event exist (e.g. while `npm test` runs in CI).
       const baseArgs = [
         ENTRY,
         '--action-dir', REPO_ROOT,
         '--project-root', projectRoot,
         '--change-id', CHANGE_ID,
         '--phase', 'green',
+        '--post-comment', 'false',
       ];
       const missing = spawnSync(process.execPath, baseArgs, { encoding: 'utf8', timeout: 60000 });
       assert.equal(missing.status, 1, missing.stdout || missing.stderr);
       assert.match(missing.stdout, /"verdict":"missing"/);
+      assert.match(missing.stdout, /"comment_posted":false/);
 
       sealGreen(projectRoot);
       const valid = spawnSync(process.execPath, baseArgs, { encoding: 'utf8', timeout: 60000 });
       assert.equal(valid.status, 0, valid.stdout || valid.stderr);
       assert.match(valid.stdout, /"verdict":"valid"/);
+      assert.match(valid.stdout, /"comment_posted":false/);
     } finally {
       rmSync(projectRoot, { recursive: true, force: true });
     }

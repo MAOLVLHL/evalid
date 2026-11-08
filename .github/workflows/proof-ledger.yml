@@ -1,0 +1,63 @@
+name: Proof ledger
+
+# Dogfoods the evalid Action on this repo's own PRs (issue #73):
+# every sealed TDD proof added or changed by a PR is verified in CI and
+# its claim-vs-evidence ledger is posted as a PR comment (upserted on a
+# stable marker, so re-runs update the same comment).
+#
+# - valid proof  -> green check + ✅ ledger comment
+# - broken seal  -> red check + ❌ ledger comment naming the breakage point
+#   (binding mismatch, snapshot drift, green-tree drift, replay mismatch)
+# - no sealed proof in the PR -> job succeeds, nothing posted
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  ledger:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          # Full history: the proof replay materializes unsealed files
+          # from the recorded git HEAD via `git archive`.
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '22'
+
+      - name: Verify sealed proofs and post the ledger
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          mapfile -t proofs < <(git diff --name-only --diff-filter=AM "origin/${{ github.base_ref }}...HEAD" -- 'specs/changes/*/tdd/*.json' || true)
+          if [ "${#proofs[@]}" -eq 0 ]; then
+            echo 'No sealed proofs in this PR; nothing to verify.'
+            exit 0
+          fi
+          failed=0
+          for proof_file in "${proofs[@]}"; do
+            # specs/changes/<change-id>/tdd/<phase>-<attempt>.json
+            change_id="$(echo "$proof_file" | cut -d/ -f3)"
+            base="$(basename "$proof_file" .json)"
+            phase="${base%-*}"
+            attempt="${base##*-}"
+            echo "--- verifying $change_id / $phase #$attempt ($proof_file)"
+            if ! node action/verify-proof.mjs \
+              --project-root . \
+              --change-id "$change_id" \
+              --phase "$phase" \
+              --attempt "$attempt"; then
+              failed=1
+            fi
+          done
+          exit "$failed"
