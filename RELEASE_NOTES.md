@@ -1,5 +1,17 @@
 # Release Notes
 
+## 0.5.16 - M3 slices 1–2: pytest assertion-execution tracking, diff-scoped (milestone M3 not yet accepted)
+
+Patch release. Two merged slices since 0.5.15, both verified end to end in CI and locally.
+
+**M3 slice 1: pytest assertion-execution tracking (#82).** Every `assert` in a pytest run is now collected (file, line, enclosing test) and the run reports which assertions actually executed, so an unexecuted assertion turns the verdict red instead of passing silently. Test evidence: 5 new tests in `test/i6d-assertion-execution.test.js` 5/5 pass; local full `npm test` 480 tests passed; main CI run 42525749105 success.
+
+**M3 slice 2: diff-scoped assertion execution (#84).** Verdicts are now scoped to the diff: only new/changed assertions count, and legacy dead asserts outside the diff are reported out of scope rather than failing the run. Test evidence: 4 new tests in `test/i6d-assertion-execution.test.js` 4/4 pass (i6d file 9/9 pass); local full `npm test` exit 0; PR CI runs verify 42535505270 and ledger 42535505267 both pass; merged main CI run 42535987353 success.
+
+**Milestone M3 — not yet accepted.** Slices 1 and 2 are merged checkpoints only; slice 3 is still to be done and the end-to-end acceptance evidence (real-scenario run + data on disk) is not yet in place. This release makes no M3 acceptance claim.
+
+Acceptance debt, stated plainly: the bench-number acceptance for P1-2, P1-3, P2-1 and P2-3 — the wall-clock/token/resolved lines from issue #5 — still awaits the MiniMax full-matrix batch (15 instances × 4 arms × reps 3), which is stopped on MiniMax Token Plan quota exhaustion. No bench numbers are claimed in this release.
+
 ## 0.5.15 - xflow audit standalone mode (milestone M2 accepted)
 
 Patch release. One new feature since 0.5.14, verified end to end in CI and locally.

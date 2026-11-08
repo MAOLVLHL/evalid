@@ -1,6 +1,6 @@
 # evalid Launch Dossier
 
-Generated: 2026-11-08T19:55:19.000Z
+Generated: 2026-11-08T23:43:07.000Z
 Mode: post_publish
 Verdict: conditionally ready: engine and adoption evidence are strong, registry publication remains required for a splash launch
 Launch ready: not yet
@@ -117,7 +117,7 @@ Evidence:
 - Adoption records: 1; status: pass
 - Goal audit: pass; goal: Keep evalid credible as an open-source agent delivery runtime: repo-owned workflow contracts, executable verification gates, durable project context, and honest benchmark evidence.
 - Package evidence: missing; source: registry_json
-- Package name/version: @surlymochan/evalid@0.5.15
+- Package name/version: @surlymochan/evalid@0.5.16
 
 ## Passing Evidence
 

@@ -3,6 +3,16 @@
 All notable changes to this project are documented here. Detailed notes live in
 [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## [0.5.16] - 2026-11-09
+
+### Added
+- **M3 slice 1: pytest assertion-execution tracking (#82)**: `xflow/atoms/i6d_assertion_execution.py` now collects every `assert` in a pytest run (file, line, enclosing test) and reports which assertions actually executed, so an unexecuted assertion is red instead of silently green. Test evidence: 5 new tests in `test/i6d-assertion-execution.test.js` 5/5 pass; local full `npm test` 480 tests passed; main CI run 42525749105 success.
+- **M3 slice 2: diff-scoped assertion execution (#84)**: assertion-execution verdicts are now scoped to the diff — only new/changed assertions are in scope, legacy dead asserts outside the diff are reported out of scope instead of failing the run. Test evidence: 4 new tests in `test/i6d-assertion-execution.test.js` 4/4 pass (i6d file 9/9 pass); local full `npm test` exit 0; PR CI runs verify 42535505270 and ledger 42535505267 both pass; merged main CI run 42535987353 success.
+
+Milestone M3 "pytest assertion-execution tracking" — **not yet accepted**: slices 1 and 2 are merged checkpoints only; slice 3 is still to be done and the end-to-end acceptance evidence (real-scenario run + data on disk) is not yet in place. This release does not claim M3 acceptance.
+
+Acceptance debt, stated plainly: the bench-number acceptance for P1-2 / P1-3 / P2-1 / P2-3 still awaits the MiniMax full-matrix batch (15 instances × 4 arms × reps 3), which is stopped on MiniMax Token Plan quota exhaustion. No bench numbers are claimed in this release.
+
 ## [0.5.15] - 2026-11-09
 
 ### Added
