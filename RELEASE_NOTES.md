@@ -1,5 +1,13 @@
 # Release Notes
 
+## 0.5.12 - Policy resolve atom test coverage
+
+Patch release. One test-coverage addition since 0.5.11, verified by the full test suite. No runtime behaviour changed.
+
+**Policy resolve atom coverage (#66).** P1 `policy.resolve` (`src/core/atoms/policy/resolve.js`) now has 6 tests in `test/policy-overlay.test.js`, covering personal-default resolution with `policy_effective.json` writing, change_id and execution_mode taken from input, `team_policy_missing` / `team_policy_invalid` passthrough, no artifact when no change id is supplied, and registry wiring. Coverage went from 0% to 100% statements / 83.33% branches / 100% functions / 100% lines (the single uncovered branch is the `process.cwd()` fallback, untested by design). Test evidence: RED→GREEN verified (stubbed-throwing implementation failed the new tests, then green after restore); `npm test` 435 tests / 434 pass / 0 fail / 1 skipped (pre-existing).
+
+Acceptance debt, stated plainly: the bench-number acceptance for P1-2, P1-3, P2-1 and P2-3 — the wall-clock/token/resolved lines from issue #5 — still awaits the MiniMax full-matrix batch (15 instances × 4 arms × reps 3), which is stopped on MiniMax Token Plan quota exhaustion. No bench numbers are claimed in this release.
+
 ## 0.5.11 - Codex app bridge and layout competition atoms test coverage
 
 Patch release. Two test-coverage additions since 0.5.10, both verified by the full test suite. No runtime behaviour changed.

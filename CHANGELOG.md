@@ -5,6 +5,13 @@ All notable changes to this project are documented here. Detailed notes live in
 
 ## [Unreleased]
 
+## [0.5.12] - 2026-11-08
+
+### Added
+- **Policy resolve atom coverage (#66)**: `src/core/atoms/policy/resolve.js` (P1 `policy.resolve`) was at 0% coverage. Added 6 tests to `test/policy-overlay.test.js` covering personal-default resolution with `policy_effective.json` writing, change_id and execution_mode taken from input, `team_policy_missing` / `team_policy_invalid` passthrough, no artifact when no change id is supplied, and registry wiring. Test evidence: RED→GREEN (stubbed-throwing implementation failed the new tests, then green after restore); `node --test test/policy-overlay.test.js` 18 pass / 0 fail; `npm test` 435 tests / 434 pass / 0 fail / 1 skipped (pre-existing); coverage after: resolve.js 100% statements / 83.33% branches / 100% functions / 100% lines (was 0% before; the single uncovered branch is the `process.cwd()` fallback, untested by design to avoid polluting the repo).
+
+Acceptance debt, stated plainly: the bench-number acceptance for P1-2 / P1-3 / P2-1 / P2-3 still awaits the MiniMax full-matrix batch (15 instances × 4 arms × reps 3), which is stopped on MiniMax Token Plan quota exhaustion. No bench numbers are claimed in this release.
+
 ## [0.5.11] - 2026-11-08
 
 ### Added
