@@ -12,6 +12,7 @@ import { missionShow } from '../src/core/atoms/mission/show.js';
 import { phaseRunStart } from '../src/core/atoms/phase-run/start.js';
 import { phaseRunPersist } from '../src/core/atoms/phase-run/persist.js';
 import { phaseRunComplete } from '../src/core/atoms/phase-run/complete.js';
+import { phaseRunFail } from '../src/core/atoms/phase-run/fail.js';
 import agentInvoke, { resolveAgentTimeoutMs } from '../src/core/atoms/agent-invoke.js';
 import { teamRun } from '../src/agent_team/atoms/team-run.js';
 import { pencilDraft } from '../src/agent_team/atoms/pencil/draft.js';
@@ -139,6 +140,193 @@ describe('Heavy atoms', { concurrency: false }, () => {
       assert.equal(state.phase_runs.length, 1);
       assert.equal(state.phase_runs[0].executed_phases[0], 'explore');
       assert.equal(state.phase_run_sessions[0].status, 'completed');
+    } finally {
+      cleanupProjectRoot(projectRoot);
+    }
+  });
+
+  test('D3d phase-run fail marks the session failed with summary and detail', async () => {
+    const projectRoot = makeProjectRoot();
+    try {
+      const created = await missionCreate(
+        { goal: 'Run failing phase', workspace: projectRoot },
+        { projectRoot, changeId: 'chg-fail-1', runtime: {} },
+      );
+      const missionId = created.mission_id;
+      const started = await phaseRunStart(
+        { mission_id: missionId, phase: 'explore', summary: 'Explore the space' },
+        { projectRoot, runtime: {} },
+      );
+      assert.equal(started.session.status, 'running');
+
+      const failed = await phaseRunFail(
+        {
+          mission_id: missionId,
+          session_id: started.session.session_id,
+          summary: 'agent crashed',
+          detail: 'exit 1 on explore',
+        },
+        { projectRoot, runtime: {} },
+      );
+      assert.equal(failed.ok, true);
+      assert.equal(failed.mission_id, missionId);
+      assert.equal(failed.data_file, resolve(projectRoot, '.as-xflow', 'state.sqlite'));
+      assert.equal(failed.session.session_id, started.session.session_id);
+      assert.equal(failed.session.status, 'failed');
+      assert.equal(failed.session.stop_reason, 'agent crashed');
+      assert.equal(failed.session.failure.summary, 'agent crashed');
+      assert.equal(failed.session.failure.detail, 'exit 1 on explore');
+      assert.ok(failed.session.completed_at);
+
+      const state = await readStore(resolve(projectRoot, '.as-xflow', 'state.sqlite'));
+      assert.equal(state.phase_run_sessions.length, 1);
+      assert.equal(state.phase_run_sessions[0].status, 'failed');
+      assert.equal(state.phase_run_sessions[0].stop_reason, 'agent crashed');
+    } finally {
+      cleanupProjectRoot(projectRoot);
+    }
+  });
+
+  test('D3d phase-run fail resolves the latest running session without a session_id', async () => {
+    const projectRoot = makeProjectRoot();
+    try {
+      const created = await missionCreate(
+        { goal: 'Run failing phase without session id', workspace: projectRoot },
+        { projectRoot, changeId: 'chg-fail-2', runtime: {} },
+      );
+      const missionId = created.mission_id;
+      const started = await phaseRunStart(
+        { mission_id: missionId, phase: 'explore', summary: 'Explore the space' },
+        { projectRoot, runtime: {} },
+      );
+
+      const failed = await phaseRunFail(
+        { mission_id: missionId, summary: 'no session id given' },
+        { projectRoot, runtime: {} },
+      );
+      assert.equal(failed.session.session_id, started.session.session_id);
+      assert.equal(failed.session.status, 'failed');
+      assert.equal(failed.session.stop_reason, 'no session id given');
+    } finally {
+      cleanupProjectRoot(projectRoot);
+    }
+  });
+
+  test('D3d phase-run fail resolves the session id from runtime context', async () => {
+    const projectRoot = makeProjectRoot();
+    try {
+      const created = await missionCreate(
+        { goal: 'Run failing phase via runtime session', workspace: projectRoot },
+        { projectRoot, changeId: 'chg-fail-3', runtime: {} },
+      );
+      const missionId = created.mission_id;
+      const started = await phaseRunStart(
+        { mission_id: missionId, phase: 'explore', summary: 'Explore the space' },
+        { projectRoot, runtime: {} },
+      );
+
+      const failed = await phaseRunFail(
+        { mission_id: missionId, summary: 'runtime session' },
+        { projectRoot, runtime: { phaseRunSessionId: started.session.session_id } },
+      );
+      assert.equal(failed.session.session_id, started.session.session_id);
+      assert.equal(failed.session.status, 'failed');
+    } finally {
+      cleanupProjectRoot(projectRoot);
+    }
+  });
+
+  test('D3d phase-run fail falls back to stop_reason and then to the default summary', async () => {
+    const projectRoot = makeProjectRoot();
+    try {
+      const first = await missionCreate(
+        { goal: 'Fail with stop_reason only', workspace: projectRoot },
+        { projectRoot, changeId: 'chg-fail-4', runtime: {} },
+      );
+      await phaseRunStart(
+        { mission_id: first.mission_id, phase: 'explore', summary: 'Explore the space' },
+        { projectRoot, runtime: {} },
+      );
+      const byReason = await phaseRunFail(
+        { mission_id: first.mission_id, stop_reason: 'timeout' },
+        { projectRoot, runtime: {} },
+      );
+      assert.equal(byReason.session.status, 'failed');
+      assert.equal(byReason.session.stop_reason, 'timeout');
+      assert.equal(byReason.session.failure.summary, 'timeout');
+      assert.equal(byReason.session.failure.detail, null);
+
+      const second = await missionCreate(
+        { goal: 'Fail with no reason at all', workspace: projectRoot },
+        { projectRoot, changeId: 'chg-fail-5', runtime: {} },
+      );
+      await phaseRunStart(
+        { mission_id: second.mission_id, phase: 'explore', summary: 'Explore the space' },
+        { projectRoot, runtime: {} },
+      );
+      const byDefault = await phaseRunFail(
+        { mission_id: second.mission_id },
+        { projectRoot, runtime: {} },
+      );
+      assert.equal(byDefault.session.status, 'failed');
+      assert.equal(byDefault.session.stop_reason, 'phase_run_failed');
+      assert.equal(byDefault.session.failure.summary, 'phase_run_failed');
+    } finally {
+      cleanupProjectRoot(projectRoot);
+    }
+  });
+
+  test('D3d phase-run fail honours an explicit data_file', async () => {
+    const projectRoot = makeProjectRoot();
+    try {
+      const dataFile = resolve(projectRoot, '.as-xflow', 'custom.sqlite');
+      const created = await missionCreate(
+        { goal: 'Fail against an explicit store', workspace: projectRoot, data_file: dataFile },
+        { projectRoot, changeId: 'chg-fail-7', runtime: {} },
+      );
+      const started = await phaseRunStart(
+        { mission_id: created.mission_id, phase: 'explore', summary: 'Explore the space', data_file: dataFile },
+        { projectRoot, runtime: {} },
+      );
+
+      const failed = await phaseRunFail(
+        { mission_id: created.mission_id, summary: 'explicit store', data_file: dataFile },
+        { projectRoot, runtime: {} },
+      );
+      assert.equal(failed.data_file, dataFile);
+      assert.equal(failed.session.session_id, started.session.session_id);
+      assert.equal(failed.session.status, 'failed');
+      assert.equal(existsSync(dataFile), true);
+    } finally {
+      cleanupProjectRoot(projectRoot);
+    }
+  });
+
+  test('D3d phase-run fail requires a mission id', async () => {    const projectRoot = makeProjectRoot();
+    try {
+      await assert.rejects(
+        () => phaseRunFail({}, { projectRoot, runtime: {} }),
+        /mission_id is required for D3d\.phase_run\.fail/,
+      );
+    } finally {
+      cleanupProjectRoot(projectRoot);
+    }
+  });
+
+  test('D3d phase-run fail throws when no session exists for the mission', async () => {
+    const projectRoot = makeProjectRoot();
+    try {
+      const created = await missionCreate(
+        { goal: 'Fail without any session', workspace: projectRoot },
+        { projectRoot, changeId: 'chg-fail-6', runtime: {} },
+      );
+      await assert.rejects(
+        () => phaseRunFail(
+          { mission_id: created.mission_id, summary: 'nothing to fail' },
+          { projectRoot, runtime: {} },
+        ),
+        new RegExp(`No phase run session found for mission ${created.mission_id}`),
+      );
     } finally {
       cleanupProjectRoot(projectRoot);
     }
