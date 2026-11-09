@@ -15,6 +15,7 @@ import {
   updateRerun,
 } from '../src/core/mission-state.js';
 import { mutateStore, resolveDataFile } from '../src/core/state-store.js';
+import { appendExecutionLog } from '../src/core/execution-log.js';
 
 async function waitFor(check, { timeoutMs = 5000, intervalMs = 50 } = {}) {
   const deadline = Date.now() + timeoutMs;
@@ -313,6 +314,70 @@ describe('Server', () => {
       assert.match(chunk, /pencil_pen/);
       assert.match(chunk, /parallel_weight/);
       assert.match(chunk, /"pending_gates":\[\]/);
+    } finally {
+      await new Promise((resolveClose) => server.close(resolveClose));
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('event stream tails new execution log entries and replays from Last-Event-ID', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'openflow-server-tail-'));
+    const server = await startServer({ projectRoot, port: 0 });
+    try {
+      const address = server.address();
+      const port = typeof address === 'object' && address ? address.port : 8787;
+      const base = `http://127.0.0.1:${port}`;
+
+      const openStream = async (headers = {}) => {
+        const streamResponse = await fetch(`${base}/api/events`, { headers });
+        assert.equal(streamResponse.status, 200);
+        const reader = streamResponse.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        const readUntil = async (marker, timeoutMs = 8000) => {
+          const deadline = Date.now() + timeoutMs;
+          while (!buffer.includes(marker)) {
+            if (Date.now() > deadline) {
+              throw new Error(`Timed out waiting for "${marker}"; received: ${buffer.slice(-300)}`);
+            }
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+          }
+          return buffer;
+        };
+        return { reader, readUntil };
+      };
+
+      // A fresh client gets the snapshot first, then only entries written after it.
+      const live = await openStream();
+      await live.readUntil('event: snapshot');
+      await appendExecutionLog(projectRoot, { kind: 'atom_run', atom_id: 'TAILED.one', status: 'ok' });
+      const liveText = await live.readUntil('TAILED.one');
+      assert.match(liveText, /event: log/);
+      const logIds = [...liveText.matchAll(/id: ([a-f0-9]{64})/g)].map((match) => match[1]);
+      assert.ok(logIds.length >= 1);
+      await live.reader.cancel();
+
+      // Reconnecting with Last-Event-ID replays exactly what the client missed.
+      const missed = await appendExecutionLog(projectRoot, { kind: 'atom_run', atom_id: 'TAILED.two', status: 'ok' });
+      assert.ok(missed);
+      const reconnected = await openStream({ 'last-event-id': logIds[logIds.length - 1] });
+      const replayText = await reconnected.readUntil('event: log');
+      const replayed = replayText.slice(replayText.indexOf('event: log'));
+      assert.match(replayed, /TAILED\.two/);
+      assert.doesNotMatch(replayed, /TAILED\.one/);
+      await reconnected.reader.cancel();
+
+      // An unknown Last-Event-ID (rotated or deleted log) falls back to following new entries.
+      const stale = await openStream({ 'last-event-id': 'deadbeef' });
+      await stale.readUntil('event: snapshot');
+      await appendExecutionLog(projectRoot, { kind: 'atom_run', atom_id: 'TAILED.three', status: 'ok' });
+      const staleText = await stale.readUntil('event: log');
+      const followed = staleText.slice(staleText.indexOf('event: log'));
+      assert.match(followed, /TAILED\.three/);
+      assert.doesNotMatch(followed, /TAILED\.one/);
+      await stale.reader.cancel();
     } finally {
       await new Promise((resolveClose) => server.close(resolveClose));
       rmSync(projectRoot, { recursive: true, force: true });
