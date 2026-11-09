@@ -231,6 +231,13 @@ claims found in the supplied text), `unverifiable` (a claimed command
 could not run). Exit codes are 0 / 1 / 3 / 1 respectively (2 = misuse).
 `--json` prints the machine-readable report; `--out <file>` writes it.
 
+When the diff touches Python test files and the audited repo carries the
+I6d plugin (`xflow/atoms/i6d_assertion_execution.py`), the audit also runs
+the assertion-execution gate: an added or changed assertion that never
+executes during the green replay flips the verdict to `mismatch`, even
+when every claimed run replays green. `scripts/demo-i6d-gate.sh` is a
+self-contained red/green demonstration of that gate (M3).
+
 ## Commands
 
 The installed binary is `xflow` (`npm install -g evalid` installs the `xflow` CLI). Every
