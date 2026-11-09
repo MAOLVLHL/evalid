@@ -1,17 +1,56 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { join, resolve, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 
 import {
   extractClaims,
+  isPythonTestFile,
   parseClaimCounts,
   parseDiffFiles,
   parseReplayCounts,
   runAudit,
 } from '../src/core/audit.js';
+
+const repoRoot = resolve(import.meta.dirname, '..');
+const python = process.env.PYTHON || 'python3';
+
+// Live pytest runs need a python with pytest importable (same approach as
+// the i6d tests: ambient interpreter, else a throwaway venv in tmpdir).
+// If neither works, the live tests skip instead of failing on an
+// environment gap.
+let pytestPython = null;
+let pytestVenvDir = null;
+// The venv is per test-file process; remove it when the process exits so
+// repeated full-suite runs do not fill the 512M /tmp tmpfs (ENOSPC).
+process.on('exit', () => {
+  if (pytestVenvDir) rmSync(pytestVenvDir, { recursive: true, force: true });
+});
+function ensurePytestPython() {
+  if (pytestPython !== null) return pytestPython;
+  const check = spawnSync(python, ['-c', 'import pytest'], { encoding: 'utf8' });
+  if (check.status === 0) {
+    pytestPython = python;
+    return pytestPython;
+  }
+  const venvDir = mkdtempSync(join(tmpdir(), 'evalid-audit-venv-'));
+  const venv = spawnSync(python, ['-m', 'venv', venvDir], { encoding: 'utf8' });
+  if (venv.status !== 0) {
+    rmSync(venvDir, { recursive: true, force: true });
+    return null;
+  }
+  const venvPython = join(venvDir, 'bin', 'python');
+  const install = spawnSync(venvPython, ['-m', 'pip', 'install', '--quiet', 'pytest'], { encoding: 'utf8' });
+  if (install.status !== 0) {
+    rmSync(venvDir, { recursive: true, force: true });
+    return null;
+  }
+  pytestVenvDir = venvDir;
+  pytestPython = venvPython;
+  return pytestPython;
+}
 
 const PR75_BODY = `## Green-path proof in this PR
 \`specs/changes/pr-comment-ledger/\` is force-added so this PR itself carries a sealed green proof for the new tests (\`node --test test/github-action-ledger-comment.test.js test/github-action-verify-proof.test.js\`, exit 0).
@@ -166,6 +205,10 @@ describe('runAudit end-to-end on a fixture repo', () => {
       assert.equal(report.verdict, 'verified', JSON.stringify(report, null, 2));
       assert.equal(report.claims[0].replay.exit, 0);
       assert.equal(report.claims[0].replay.counts.passed, 2);
+      // No I6d plugin in this repo: the gate must not apply and must not
+      // change the verdict.
+      assert.equal(report.i6d.applicable, false);
+      assert.equal(report.i6d.reason, 'plugin_not_present');
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }
@@ -203,6 +246,161 @@ describe('runAudit end-to-end on a fixture repo', () => {
       const report = runAudit({ repoDir: repo, headRef: base, claimsText: 'Docs only.' });
       assert.equal(report.verdict, 'no_claims');
       assert.equal(report.exitCode, 3);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('runAudit with the I6d assertion-execution gate (M3 slice 3)', () => {
+  const PYTEST_BASE = [
+    'def test_normal():',
+    '    assert 1 + 1 == 2',
+    '',
+  ].join('\n');
+
+  const PYTEST_DEAD = [
+    'def test_callback_never_runs():',
+    '    def on_done(value):',
+    '        assert value == 42',
+    '    # on_done is defined but never called: its assert never executes.',
+    '    assert True',
+    '',
+    '',
+    'def test_normal():',
+    '    assert 1 + 1 == 2',
+    '',
+  ].join('\n');
+
+  const PYTEST_GREEN = [
+    'def test_normal():',
+    '    assert 1 + 1 == 2',
+    '',
+    '',
+    'def test_new_ok():',
+    '    assert 2 + 2 == 4',
+    '',
+  ].join('\n');
+
+  // Fixture repo that carries the I6d plugin (copied from this repo) and
+  // one committed Python test file. The diff under audit adds to it.
+  function makePytestFixtureRepo() {
+    const repo = mkdtempSync(join(tmpdir(), 'evalid-audit-i6d-'));
+    const git = (args) => {
+      const result = spawnSync('git', args, { cwd: repo, encoding: 'utf8' });
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      return result;
+    };
+    git(['init', '-q', '-b', 'main']);
+    git(['config', 'user.email', 'audit-fixture@example.test']);
+    git(['config', 'user.name', 'audit-fixture']);
+    mkdirSync(join(repo, 'xflow', 'atoms'), { recursive: true });
+    copyFileSync(
+      join(repoRoot, 'xflow', 'atoms', 'i6d_assertion_execution.py'),
+      join(repo, 'xflow', 'atoms', 'i6d_assertion_execution.py'),
+    );
+    writeFileSync(join(repo, 'test_dead.py'), PYTEST_BASE);
+    git(['add', '.']);
+    git(['commit', '-qm', 'base']);
+    return { repo, git };
+  }
+
+  const live = () => ensurePytestPython() === null && 'pytest unavailable and venv install failed';
+
+  // The claimed replay spawns bare `pytest` from PATH; the venv python
+  // that has pytest is not on PATH, so prepend its bin dir while the
+  // audit runs (the I6d gate itself gets the venv python explicitly).
+  function withPytestOnPath(fn) {
+    const binDir = dirname(ensurePytestPython());
+    const prev = process.env.PATH;
+    process.env.PATH = `${binDir}:${prev}`;
+    try {
+      return fn();
+    } finally {
+      process.env.PATH = prev;
+    }
+  }
+
+  test('isPythonTestFile matches pytest default collection names', () => {
+    assert.equal(isPythonTestFile('test_calc.py'), true);
+    assert.equal(isPythonTestFile('tests/test_calc.py'), true);
+    assert.equal(isPythonTestFile('calc_test.py'), true);
+    assert.equal(isPythonTestFile('src/calc.py'), false);
+    assert.equal(isPythonTestFile('test_calc.js'), false);
+    assert.equal(isPythonTestFile('tests/helpers.py'), false);
+  });
+
+  test('mismatch when the replay is green but an in-diff assert never executed', { skip: live() }, () => {
+    const { repo } = makePytestFixtureRepo();
+    try {
+      const base = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim();
+      const diff = makeDiff(repo, () => {
+        writeFileSync(join(repo, 'test_dead.py'), PYTEST_DEAD);
+      });
+      const report = withPytestOnPath(() => runAudit({
+        repoDir: repo,
+        diffText: diff,
+        baseRef: base,
+        claimsText: 'Tests: `pytest test_dead.py` — 2 tests, all pass.',
+        python: ensurePytestPython(),
+      }));
+      // The claimed pytest run really passes on replay -- the gate, not
+      // the replay, is what flips this to mismatch.
+      assert.equal(report.claims[0].match, true, JSON.stringify(report, null, 2));
+      assert.equal(report.i6d.applicable, true);
+      assert.equal(report.i6d.verdict, 'unexecuted_assertions');
+      assert.equal(report.i6d.unexecuted.length, 1);
+      assert.equal(report.i6d.unexecuted[0].line, 3);
+      assert.match(report.i6d.unexecuted[0].source, /assert value == 42/);
+      assert.equal(report.verdict, 'mismatch', JSON.stringify(report, null, 2));
+      assert.equal(report.exitCode, 1);
+      assert.equal(report.ok, false);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test('verified when the diff adds only executed assertions', { skip: live() }, () => {
+    const { repo } = makePytestFixtureRepo();
+    try {
+      const base = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim();
+      const diff = makeDiff(repo, () => {
+        writeFileSync(join(repo, 'test_dead.py'), PYTEST_GREEN);
+      });
+      const report = withPytestOnPath(() => runAudit({
+        repoDir: repo,
+        diffText: diff,
+        baseRef: base,
+        claimsText: 'Tests: `pytest test_dead.py` — 2 tests, all pass.',
+        python: ensurePytestPython(),
+      }));
+      assert.equal(report.verdict, 'verified', JSON.stringify(report, null, 2));
+      assert.equal(report.i6d.applicable, true);
+      assert.equal(report.i6d.verdict, 'pass');
+      assert.deepEqual(report.i6d.unexecuted, []);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test('--no-i6d leaves a green replay verified even with a dead assert', { skip: live() }, () => {
+    const { repo } = makePytestFixtureRepo();
+    try {
+      const base = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim();
+      const diff = makeDiff(repo, () => {
+        writeFileSync(join(repo, 'test_dead.py'), PYTEST_DEAD);
+      });
+      const report = withPytestOnPath(() => runAudit({
+        repoDir: repo,
+        diffText: diff,
+        baseRef: base,
+        claimsText: 'Tests: `pytest test_dead.py` — 2 tests, all pass.',
+        python: ensurePytestPython(),
+        i6d: false,
+      }));
+      assert.equal(report.verdict, 'verified', JSON.stringify(report, null, 2));
+      assert.equal(report.i6d.applicable, false);
+      assert.equal(report.i6d.reason, 'disabled');
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }

@@ -5810,6 +5810,8 @@ async function handleAudit(args) {
     headRef,
     claimsText,
     timeoutMs,
+    python: process.env.PYTHON || 'python3',
+    i6d: !parsedArgs.no_i6d,
     keepWorkdir: Boolean(parsedArgs.keep_workdir),
   });
   if (parsedArgs.out) writeFileSync(resolve(parsedArgs.out), `${JSON.stringify(report, null, 2)}\n`);
@@ -6740,7 +6742,11 @@ Audit any git diff / PR without adopting evalid workflows: extract the test
 runs the change claims to have passed, replay each one in a clean clone at
 the change's head, and compare exit codes and pass/fail counts against the
 claim. Diffs carrying an evalid proof seal are replayed through the existing
-i6b seal validator. No seal semantics, CLI name, or bin path changes.
+i6b seal validator. When the diff touches Python test files and the audited
+repo carries the I6d plugin, the I6d assertion-execution gate also runs in
+the scratch clone (scoped to the diff): unexecuted in-diff assertions flip
+the verdict to mismatch, since a green run that never executed an assertion
+must not count as green. No seal semantics, CLI name, or bin path changes.
 
 Verdicts / exit codes: verified 0, mismatch 1, unverifiable 1, misuse 2,
 no_claims 3 (no test claims found in the supplied text).
@@ -6754,6 +6760,7 @@ Options:
   --claims TEXT       Claims text (default: PR body for --pr)
   --claims-file FILE  Read claims text from a file
   --timeout SEC       Per-command replay timeout, default: 300
+  --no-i6d            Skip the I6d assertion-execution gate
   --json              Print the machine-readable report
   --out FILE          Write the JSON report to a file
   --keep-workdir      Keep the scratch clone for debugging

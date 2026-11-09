@@ -14,6 +14,12 @@ const python = process.env.PYTHON || 'python3';
 // deleted with the fixture). If neither works, the live tests skip instead
 // of failing on an environment gap.
 let pytestPython = null;
+let pytestVenvDir = null;
+// The venv is per test-file process; remove it when the process exits so
+// repeated full-suite runs do not fill the 512M /tmp tmpfs (ENOSPC).
+process.on('exit', () => {
+  if (pytestVenvDir) rmSync(pytestVenvDir, { recursive: true, force: true });
+});
 function ensurePytestPython() {
   if (pytestPython !== null) return pytestPython;
   const check = spawnSync(python, ['-c', 'import pytest'], { encoding: 'utf8' });
@@ -33,6 +39,7 @@ function ensurePytestPython() {
     rmSync(venvDir, { recursive: true, force: true });
     return null;
   }
+  pytestVenvDir = venvDir;
   pytestPython = venvPython;
   return pytestPython;
 }
@@ -357,6 +364,210 @@ describe('i6d assertion execution gate (M3 slice 1)', () => {
       assert.deepEqual(evidence.unexecuted, []);
       assert.equal(evidence.skipped.length, 1);
       assert.equal(evidence.skipped[0].test, 'test_skipped');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('i6d assertion execution gate (M3 slice 3: diff-file scope and atom mode)', () => {
+  function gitAvailable() {
+    return spawnSync('git', ['--version'], { encoding: 'utf8' }).status === 0;
+  }
+
+  function gitCmd(dir, args) {
+    const result = spawnSync('git', [
+      '-c', 'user.name=evalid-test',
+      '-c', 'user.email=test@example.com',
+      ...args,
+    ], { cwd: dir, encoding: 'utf8' });
+    assert.equal(result.status, 0, `git ${args.join(' ')} failed: ${result.stdout}${result.stderr}`);
+    return result.stdout.trim();
+  }
+
+  // Baseline committed on main; the feature change stays UNCOMMITTED so
+  // the diff comes from `git diff` (the audit's --diff shape).
+  function writeUncommittedRepo(featureContent) {
+    const dir = writeFixture({ 'test_mixed.py': [
+      'def test_legacy_ok():',
+      '    assert 1 + 1 == 2',
+      '',
+    ].join('\n') });
+    gitCmd(dir, ['init', '-b', 'main']);
+    gitCmd(dir, ['add', '.']);
+    gitCmd(dir, ['commit', '-m', 'baseline']);
+    writeFileSync(join(dir, 'test_mixed.py'), featureContent);
+    return dir;
+  }
+
+  const FEATURE_DEAD_APPEND = [
+    'def test_legacy_ok():',
+    '    assert 1 + 1 == 2',
+    '',
+    '',
+    'def test_new_dead():',
+    '    def on_done(value):',
+    '        assert value == 99',
+    '    assert True',
+    '',
+  ].join('\n');
+
+  const FEATURE_GREEN_APPEND = [
+    'def test_legacy_ok():',
+    '    assert 1 + 1 == 2',
+    '',
+    '',
+    'def test_new_ok():',
+    '    assert 2 + 2 == 4',
+    '',
+  ].join('\n');
+
+  function runDiffFileGate(fixtureDir, diffText) {
+    const diffPath = join(fixtureDir, 'change.diff');
+    writeFileSync(diffPath, diffText);
+    const evidencePath = join(fixtureDir, 'evidence.json');
+    const result = spawnSync(python, [
+      modulePath,
+      '--root', fixtureDir,
+      '--output', evidencePath,
+      '--pytest-python', ensurePytestPython() || python,
+      '--only-changed', '--diff-file', diffPath,
+    ], { encoding: 'utf8' });
+    const evidence = existsSync(evidencePath)
+      ? JSON.parse(readFileSync(evidencePath, 'utf8'))
+      : null;
+    return { result, evidence };
+  }
+
+  function runAtomGate(fixtureDir, extraArgs = []) {
+    const result = spawnSync(python, [
+      modulePath,
+      '--project-root', fixtureDir,
+      '--change-id', 'chg-i6d',
+      '--pytest-python', ensurePytestPython() || python,
+      '--only-changed',
+      ...extraArgs,
+    ], { encoding: 'utf8' });
+    const proofPath = join(fixtureDir, 'specs', 'changes', 'chg-i6d', 'tdd', 'i6d-0.json');
+    const evidence = existsSync(proofPath)
+      ? JSON.parse(readFileSync(proofPath, 'utf8'))
+      : null;
+    let summary = null;
+    try { summary = JSON.parse(result.stdout.trim()); } catch { /* human output */ }
+    return { result, evidence, summary, proofPath };
+  }
+
+  const live = () => (!gitAvailable() || ensurePytestPython() === null) && 'git or pytest unavailable';
+
+  test('changed_lines_from_diff counts only added lines, even with context', () => {
+    const diff = [
+      'diff --git a/test_mixed.py b/test_mixed.py',
+      '--- a/test_mixed.py',
+      '+++ b/test_mixed.py',
+      '@@ -1,3 +1,6 @@',
+      ' def test_legacy_ok():',
+      '+    def on_done(value):',
+      '+        assert value == 99',
+      '     assert 1 + 1 == 2',
+      '+    assert 2 + 2 == 4',
+      '-    assert 9 == 9',
+      '',
+    ].join('\n');
+    const probe = spawnSync(python, ['-c', [
+      'import json, sys',
+      'sys.path.insert(0, "xflow/atoms")',
+      'from i6d_assertion_execution import changed_lines_from_diff',
+      `changed = changed_lines_from_diff(${JSON.stringify(diff)}, ${JSON.stringify(repoRoot)})`,
+      'print(json.dumps({k: sorted(v) for k, v in changed.items()}))',
+    ].join('; ')], { cwd: repoRoot, encoding: 'utf8' });
+    assert.equal(probe.status, 0, probe.stderr);
+    const out = JSON.parse(probe.stdout);
+    const files = Object.keys(out);
+    assert.equal(files.length, 1);
+    assert.match(files[0], /test_mixed\.py$/);
+    // Added lines are 2, 3 and 5; the context line (4) and the removed
+    // line (which would be 6) are not in scope.
+    assert.deepEqual(out[files[0]], [2, 3, 5]);
+  });
+
+  test('diff-file scope: uncommitted dead assert is red', { skip: live() }, () => {
+    const dir = writeUncommittedRepo(FEATURE_DEAD_APPEND);
+    try {
+      const diffText = gitCmd(dir, ['diff']);
+      const { result, evidence } = runDiffFileGate(dir, diffText);
+      assert.equal(result.status, 1, result.stdout + result.stderr);
+      assert.ok(evidence, 'evidence.json missing');
+      assert.equal(evidence.verdict, 'unexecuted_assertions');
+      assert.equal(evidence.diffSource, 'diff-file');
+      assert.equal(evidence.unexecuted.length, 1);
+      assert.equal(evidence.unexecuted[0].line, 7);
+      assert.match(evidence.unexecuted[0].source, /assert value == 99/);
+      assert.match(result.stdout, /unexecuted_assertions/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('diff-file scope: uncommitted green change passes', { skip: live() }, () => {
+    const dir = writeUncommittedRepo(FEATURE_GREEN_APPEND);
+    try {
+      const diffText = gitCmd(dir, ['diff']);
+      const { result, evidence } = runDiffFileGate(dir, diffText);
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      assert.ok(evidence, 'evidence.json missing');
+      assert.equal(evidence.verdict, 'pass');
+      assert.deepEqual(evidence.unexecuted, []);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('atom mode: committed dead assert writes i6d-0.json and prints one JSON line', { skip: live() }, () => {
+    const dir = writeFixture({ 'test_mixed.py': [
+      'def test_legacy_ok():',
+      '    assert 1 + 1 == 2',
+      '',
+    ].join('\n') });
+    try {
+      gitCmd(dir, ['init', '-b', 'main']);
+      gitCmd(dir, ['add', '.']);
+      gitCmd(dir, ['commit', '-m', 'baseline']);
+      gitCmd(dir, ['checkout', '-b', 'feature']);
+      writeFileSync(join(dir, 'test_mixed.py'), FEATURE_DEAD_APPEND);
+      gitCmd(dir, ['add', '.']);
+      gitCmd(dir, ['commit', '-m', 'feature']);
+      const { result, evidence, summary, proofPath } = runAtomGate(dir);
+      assert.equal(result.status, 1, result.stdout + result.stderr);
+      assert.ok(evidence, `i6d-0.json missing at ${proofPath}`);
+      assert.equal(evidence.verdict, 'unexecuted_assertions');
+      assert.equal(evidence.unexecuted.length, 1);
+      // Atom stdout must be exactly one JSON line: the workflow executor
+      // parses stdout as JSON, and pytest's session output is captured.
+      assert.equal(result.stdout.trim().split('\n').length, 1, result.stdout);
+      assert.ok(summary, `atom stdout is not a single JSON line: ${result.stdout}`);
+      assert.equal(summary.ok, false);
+      assert.equal(summary.verdict, 'unexecuted_assertions');
+      assert.equal(summary.proof_file, proofPath);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('atom mode: change with no Python test files passes without running pytest', { skip: live() }, () => {
+    const dir = writeFixture({ 'feature.js': 'export const answer = () => 42;\n' });
+    try {
+      gitCmd(dir, ['init', '-b', 'main']);
+      gitCmd(dir, ['add', '.']);
+      gitCmd(dir, ['commit', '-m', 'baseline']);
+      writeFileSync(join(dir, 'feature.js'), 'export const answer = () => 43;\n');
+      const { result, evidence, summary } = runAtomGate(dir);
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      assert.ok(evidence, 'i6d-0.json missing');
+      assert.equal(evidence.verdict, 'pass');
+      assert.equal(evidence.notApplicable, 'no_python_test_changes');
+      assert.ok(summary, `atom stdout is not a single JSON line: ${result.stdout}`);
+      assert.equal(summary.ok, true);
+      assert.equal(summary.verdict, 'pass');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

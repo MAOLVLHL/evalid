@@ -18,6 +18,17 @@
  *   no_claims    — no test claims found in the supplied text
  *   unverifiable — a claimed command could not run (missing runner, timeout)
  *
+ * Slice 3 (M3, issue #86) adds the I6d assertion-execution gate to the
+ * replay: when the diff touches Python test files (or a pytest run is
+ * claimed) and the audited repo carries the I6d plugin
+ * (xflow/atoms/i6d_assertion_execution.py), the gate runs in the scratch
+ * clone, scoped to the diff. A pytest run can exit 0 while an assertion
+ * inside a never-called callback never executes -- that change must not
+ * count as green, so unexecuted in-diff assertions flip the verdict to
+ * mismatch. When the plugin is absent, the diff touches no Python tests,
+ * or pytest is unavailable, the gate reports not applicable and the
+ * verdict is unchanged (the audit stays usable for any repo).
+ *
  * Exit codes mirror the verdicts: 0 verified, 1 mismatch/unverifiable,
  * 2 misuse, 3 no_claims (inconclusive, not a failure of the change).
  */
@@ -52,6 +63,101 @@ export function isTestCommand(text) {
 
 export function isTestFile(path) {
   return /(^|\/)test(s)?\/|\.test\.[cm]?[jt]sx?$|_test\.go$|^test_[^/]*\.py$|_test\.py$|\.spec\.[cm]?[jt]sx?$/.test(path);
+}
+
+/** Python files pytest collects as tests by default (test_*.py / *_test.py). */
+export function isPythonTestFile(path) {
+  const name = String(path || '').split('/').pop();
+  return /\.py$/.test(name) && (name.startsWith('test_') || name.endsWith('_test.py'));
+}
+
+/**
+ * Run the I6d assertion-execution gate in an audit scratch clone.
+ * Scope comes from the audit's diff text (--diff-file in the I6d CLI),
+ * so uncommitted diffs work without committing anything.
+ *
+ * Returns `{ applicable: false, reason }` when the gate cannot apply
+ * (no plugin in the audited repo, no Python test changes and no pytest
+ * claim, pytest unavailable), and `{ applicable: true, verdict, ... }`
+ * otherwise. `pytest_failed` in the gate run does NOT flip the audit
+ * verdict by itself -- a failing pytest run is the claim replay's job
+ * to judge; only `unexecuted_assertions` (and gate errors) change it.
+ */
+export function runI6dCheck(workdir, options = {}) {
+  const {
+    diffText = '',
+    claims = [],
+    python = process.env.PYTHON || 'python3',
+    timeoutMs = 300000,
+  } = options;
+  const plugin = join(workdir, 'xflow', 'atoms', 'i6d_assertion_execution.py');
+  if (!existsSync(plugin)) {
+    return { applicable: false, reason: 'plugin_not_present' };
+  }
+  const { files } = parseDiffFiles(diffText);
+  const changedPyTests = files.filter(isPythonTestFile);
+  const hasPytestClaim = claims.some((claim) => /\bpytest\b/.test(claim.command || ''));
+  if (changedPyTests.length === 0 && !hasPytestClaim) {
+    return { applicable: false, reason: 'no_python_test_changes' };
+  }
+  const targets = changedPyTests.filter((file) => existsSync(join(workdir, file)));
+  if (targets.length === 0 && !hasPytestClaim) {
+    return { applicable: false, reason: 'no_python_test_changes' };
+  }
+  const pytestCheck = spawnSync(python, ['-c', 'import pytest'], { cwd: workdir, encoding: 'utf8', timeout: 60000 });
+  if (pytestCheck.status !== 0) {
+    return { applicable: false, reason: 'pytest_unavailable' };
+  }
+  const scratch = mkdtempSync(join(tmpdir(), 'evalid-audit-i6d-'));
+  try {
+    const diffPath = join(scratch, 'audit.diff');
+    const evidencePath = join(scratch, 'i6d-evidence.json');
+    writeFileSync(diffPath, diffText);
+    const result = spawnSync(python, [
+      plugin,
+      '--root', workdir,
+      '--output', evidencePath,
+      '--pytest-python', python,
+      '--only-changed',
+      '--diff-file', diffPath,
+      '--',
+      ...targets,
+    ], { cwd: workdir, encoding: 'utf8', timeout: timeoutMs });
+    if (!existsSync(evidencePath)) {
+      return {
+        applicable: true,
+        verdict: 'i6d_error',
+        error: `i6d gate wrote no evidence (exit ${result.status}): ${(result.stderr || result.stdout || '').trim().slice(-300)}`,
+      };
+    }
+    let evidence;
+    try {
+      evidence = JSON.parse(readFileSync(evidencePath, 'utf8'));
+    } catch {
+      return { applicable: true, verdict: 'i6d_error', error: 'i6d evidence JSON unparseable' };
+    }
+    const unexecuted = (evidence.unexecuted || []).map((entry) => ({
+      file: String(entry.file || '').startsWith(workdir)
+        ? String(entry.file).slice(workdir.length + 1)
+        : entry.file,
+      line: entry.line,
+      test: entry.test,
+      source: entry.source,
+    }));
+    return {
+      applicable: true,
+      verdict: evidence.verdict,
+      exit: result.status,
+      executed: evidence.executed ?? 0,
+      total: evidence.total ?? 0,
+      unexecuted,
+      skipped: (evidence.skipped || []).length,
+      outOfScope: (evidence.outOfScope || []).length,
+      pytestExit: evidence.pytestExit ?? null,
+    };
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
 }
 
 function normalizeCommand(raw) {
@@ -322,6 +428,10 @@ function replaySeal(workdir, repoRoot, seal, python, timeoutMs) {
  *   timeoutMs  — per-command timeout (default 300_000)
  *   python     — python binary for the i6b validator (default 'python3')
  *   keepWorkdir — keep the scratch clone for debugging (default false)
+ *   python     — python binary for the i6b validator and the i6d gate
+ *               (default 'python3' / $PYTHON)
+ *   i6d        — run the I6d assertion-execution gate when it applies
+ *               (default true; --no-i6d on the CLI disables it)
  */
 export function runAudit(options = {}) {
   const {
@@ -333,6 +443,7 @@ export function runAudit(options = {}) {
     timeoutMs = 300000,
     python = process.env.PYTHON || 'python3',
     keepWorkdir = false,
+    i6d = true,
   } = options;
   if (!repoDir || !existsSync(repoDir)) {
     return { ok: false, verdict: 'misuse', error: `repo not found: ${repoDir}`, exitCode: 2 };
@@ -432,13 +543,27 @@ export function runAudit(options = {}) {
     const sealResults = diff.seals.map((seal) => replaySeal(workdir, resolve(repoDir), seal, python, timeoutMs));
     const badSeal = sealResults.find((seal) => !seal.ok);
 
+    // Slice 3 (M3): the I6d gate judges whether the diff's new/changed
+    // assertions really executed during the green run. A replay can exit 0
+    // while an assertion in a never-called callback never ran -- that
+    // change must not count as green.
+    const i6dResult = i6d === false
+      ? { applicable: false, reason: 'disabled' }
+      : runI6dCheck(workdir, { diffText, claims, python, timeoutMs });
+
     let verdict;
     let exitCode;
-    if (claims.length === 0 && sealResults.length === 0) {
+    if (i6dResult.applicable && i6dResult.verdict === 'unexecuted_assertions') {
+      verdict = 'mismatch';
+      exitCode = 1;
+    } else if (claims.length === 0 && sealResults.length === 0) {
       verdict = 'no_claims';
       exitCode = 3;
     } else if (mismatch || badSeal) {
       verdict = 'mismatch';
+      exitCode = 1;
+    } else if (i6dResult.applicable && (i6dResult.verdict === 'diff_error' || i6dResult.verdict === 'i6d_error')) {
+      verdict = 'unverifiable';
       exitCode = 1;
     } else if (claimResults.some((entry) => entry.replay && (entry.replay.timedOut || entry.replay.spawnError))) {
       verdict = 'unverifiable';
@@ -454,6 +579,7 @@ export function runAudit(options = {}) {
       exitCode,
       claims: claimResults,
       seals: sealResults,
+      i6d: i6dResult,
       files: diff.files,
       testFiles: diff.testFiles,
       setup,
@@ -491,6 +617,21 @@ export function renderAuditReport(report) {
   }
   for (const seal of report.seals || []) {
     lines.push(`- ${seal.ok ? '✓' : '✗'} seal ${seal.changeId}/${seal.phase}/${seal.attempt}: ${seal.verdict}`);
+  }
+  const gate = report.i6d;
+  if (gate) {
+    if (!gate.applicable) {
+      lines.push(`i6d: not applicable (${gate.reason})`);
+    } else if (gate.verdict === 'pass') {
+      lines.push(`i6d: pass (${gate.executed}/${gate.total} assertions executed, ${gate.skipped} skipped, ${gate.outOfScope} out of scope)`);
+    } else if (gate.verdict === 'unexecuted_assertions') {
+      lines.push(`i6d: ✗ unexecuted_assertions (${gate.executed}/${gate.total} executed, ${gate.unexecuted.length} unexecuted)`);
+      for (const entry of gate.unexecuted) {
+        lines.push(`  unexecuted: ${entry.file}:${entry.line}: ${entry.source}`);
+      }
+    } else {
+      lines.push(`i6d: ${gate.verdict}${gate.error ? `: ${gate.error}` : ''}`);
+    }
   }
   if (report.durationMs !== undefined) lines.push(`duration: ${(report.durationMs / 1000).toFixed(1)}s`);
   return lines.join('\n');

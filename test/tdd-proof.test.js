@@ -789,3 +789,117 @@ describe('TDD proof semantics', () => {
     }
   });
 });
+
+describe('quality review folds in I6d assertion-execution evidence (M3 slice 3)', () => {
+  function passingChangeRoot() {
+    const projectRoot = makeGitChangeRoot();
+    writeProofs(projectRoot);
+    mkdirSync(resolve(projectRoot, 'src'), { recursive: true });
+    mkdirSync(resolve(projectRoot, 'test'), { recursive: true });
+    writeFileSync(resolve(projectRoot, 'src', 'feature.js'), 'export function answer() { return 42; }\n');
+    writeFileSync(resolve(projectRoot, 'test', 'feature.test.js'), [
+      "import assert from 'node:assert/strict';",
+      "import { answer } from '../src/feature.js';",
+      "assert.equal(answer(), 42);",
+      '',
+    ].join('\n'));
+    return projectRoot;
+  }
+
+  function writeI6dEvidence(projectRoot, evidence) {
+    const tddDir = resolve(projectRoot, 'specs', 'changes', 'chg-tdd', 'tdd');
+    mkdirSync(tddDir, { recursive: true });
+    writeFileSync(resolve(tddDir, 'i6d-0.json'), JSON.stringify(evidence, null, 2));
+  }
+
+  function readQuality(projectRoot) {
+    return JSON.parse(readFileSync(
+      resolve(projectRoot, 'specs', 'changes', 'chg-tdd', 'tdd', 'quality-0.json'),
+      'utf8',
+    ));
+  }
+
+  test('unexecuted in-diff assertions fail the quality review, named per assert', () => {
+    const projectRoot = passingChangeRoot();
+    try {
+      writeI6dEvidence(projectRoot, {
+        tool: 'i6d_assertion_execution',
+        version: 3,
+        verdict: 'unexecuted_assertions',
+        total: 3,
+        executed: 2,
+        unexecuted: [
+          {
+            file: 'test_callback.py',
+            line: 3,
+            test: 'test_callback_never_runs',
+            source: 'assert value == 42',
+          },
+        ],
+        skipped: [],
+      });
+      const review = runAtom('xflow/atoms/i6c_tdd_quality_review.py', projectRoot);
+      assert.notEqual(review.status, 0, review.stdout);
+      const proof = readQuality(projectRoot);
+      assert.equal(proof.ok, false);
+      assert.equal(proof.verdict, 'failed');
+      assert.equal(proof.i6d.verdict, 'unexecuted_assertions');
+      assert.equal(proof.i6d.unexecuted, 1);
+      const flagged = proof.findings.filter((finding) => finding.code === 'unexecuted_assertions');
+      assert.equal(flagged.length, 1);
+      assert.equal(flagged[0].severity, 'fail');
+      assert.equal(flagged[0].line, 3);
+      assert.equal(flagged[0].test, 'test_callback_never_runs');
+      assert.match(flagged[0].source, /assert value == 42/);
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('passing I6d evidence adds no finding and is recorded in quality-0.json', () => {
+    const projectRoot = passingChangeRoot();
+    try {
+      writeI6dEvidence(projectRoot, {
+        tool: 'i6d_assertion_execution',
+        version: 3,
+        verdict: 'pass',
+        total: 2,
+        executed: 2,
+        unexecuted: [],
+        skipped: [],
+      });
+      const review = runAtom('xflow/atoms/i6c_tdd_quality_review.py', projectRoot);
+      assert.equal(review.status, 0, review.stderr || review.stdout);
+      const proof = readQuality(projectRoot);
+      assert.equal(proof.ok, true);
+      assert.equal(proof.i6d.verdict, 'pass');
+      assert.equal(proof.i6d.executed, 2);
+      assert.deepEqual(proof.findings.filter((finding) => finding.code === 'unexecuted_assertions'), []);
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('pytest_unavailable I6d evidence fails the quality review', () => {
+    const projectRoot = passingChangeRoot();
+    try {
+      writeI6dEvidence(projectRoot, {
+        tool: 'i6d_assertion_execution',
+        version: 3,
+        verdict: 'pytest_unavailable',
+        total: 2,
+        executed: 0,
+        unexecuted: [],
+        skipped: [],
+      });
+      const review = runAtom('xflow/atoms/i6c_tdd_quality_review.py', projectRoot);
+      assert.notEqual(review.status, 0, review.stdout);
+      const proof = readQuality(projectRoot);
+      assert.equal(proof.ok, false);
+      assert.equal(proof.i6d.verdict, 'pytest_unavailable');
+      assert.ok(proof.findings.some((finding) => finding.code === 'i6d_pytest_unavailable'));
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+});

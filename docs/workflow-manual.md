@@ -49,7 +49,7 @@
 └────────────────────────────┬────────────────────────────────────┘
                              │  atom dispatch
 ┌────────────────────────────▼────────────────────────────────────┐
-│  L0  原子组件（85 atoms，每个只有一处实现）                       │
+│  L0  原子组件（86 atoms，每个只有一处实现）                       │
 │                                                                 │
 │  xflow/atoms/*.py          A/B/C/E6/H1/I6/J/K  (lite)      │
 │  src/core/atoms/**/*.js        D/E/F/G/E3/E4/E7    (heavy)     │
@@ -219,7 +219,7 @@ CHANGE_ID=<id> xflow workflow run workflows/yolo.yaml
            │ ack
     ▼
 ┌──────────────────────┐
-│  21b tdd-green       │  atoms: I6a(green) + I6b(green) + I6c quality
+│  21b tdd-green       │  atoms: I6a(green) + I6b(green) + I6d assertion + I6c quality
 │  gate: artifact-verify│◄─── green/refactor 必须通过
 └──────────┬───────────┘
            │ exist
@@ -251,6 +251,7 @@ specs/changes/<change_id>/
 ├── tdd/
 │   ├── red-0.json       (I6a/I6b @ phase 21a, passed:false)
 │   ├── green-0.json     (I6a/I6b @ phase 21b, passed:true)
+│   ├── i6d-0.json       (I6d @ phase 21b, assertion execution)
 │   └── quality-0.json   (I6c @ phase 21b, test quality review)
 ├── merge-product.md     (A5 @ archive)
 ├── merge-architecture.md
@@ -377,8 +378,8 @@ CHANGE_ID=<id> xflow workflow run workflows/corps.yaml
 ┌──────────────────┐
 │ 21a tdd-red      │  I6a(red) + I6b(red)
 │ 22 execute       │  implementation happens here
-│ 21b tdd-green    │  I6a(green) + I6b(green) + I6c quality
-│ gate: artifact   │◄── red-0.json + green-0.json + quality-0.json
+│ 21b tdd-green    │  I6a(green) + I6b(green) + I6d assertion + I6c quality
+│ gate: artifact   │◄── red-0.json + green-0.json + i6d-0.json + quality-0.json
 └────────┬─────────┘
          │
     ▼
@@ -627,6 +628,8 @@ J 管验证      K 管收尾归档
 │    │ I6b tdd.proof_validate       重算 proof 绑定，在快照上重跑命令（lite） │
 │    │ I6c tdd.quality_review       测试质量、红绿命令、skip/弱断言；       │
 │    │                              tdd_mode=refactor|docs 时替代 red 证明  │
+│    │ I6d tdd.assertion_execution  新增/改动 pytest 断言真实执行证明；    │
+│    │                              无改动 pytest 测试时直接通过（lite）    │
 ├────┼──────────────────────────────────────────────────────────────────────┤
 │ J  │ Judge /       验证层：确定性测试 + 漂移扫描 + 证据收集   mixed   3      │
 │    │ Verify                                                               │

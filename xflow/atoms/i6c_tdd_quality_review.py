@@ -21,6 +21,14 @@ shapes of it: expected values taken from the implementation's own constants
 named callbacks that are never referenced again (they execute zero times),
 and self-comparison assertions (x == x). Type-only or existence-only
 assertions are flagged only when they are the sole assertions.
+
+Slice 3 (M3, issue #86) folds the I6d assertion-execution evidence into
+this review: when the I6d atom ran first (tdd-green phase order is I6a,
+I6b, I6d, I6c) and wrote ``specs/changes/<id>/tdd/i6d-0.json``, an
+``unexecuted_assertions`` verdict becomes one fail finding per unexecuted
+assert, and a ``pytest_unavailable`` verdict becomes a fail finding of its
+own. When no i6d-0.json exists (I6d not run, e.g. a change with no Python
+tests) this review behaves exactly as before.
 """
 import argparse
 import json
@@ -343,6 +351,43 @@ def main() -> None:
     for test_file in sorted(reviewed):
         findings.extend(review_test_file(project_root, test_file, implementation_sources))
 
+    # Slice 3 (M3): fold the I6d assertion-execution evidence in, when the
+    # I6d atom ran first and wrote i6d-0.json. An assertion that never
+    # executed during the green run must fail the quality gate, even when
+    # the run itself was green. No i6d-0.json means I6d did not run (no
+    # Python test changes): behaviour is unchanged, no finding added.
+    i6d_evidence = read_json(proof_dir / "i6d-0.json")
+    i6d_summary = None
+    if i6d_evidence:
+        i6d_summary = {
+            "verdict": i6d_evidence.get("verdict"),
+            "executed": i6d_evidence.get("executed"),
+            "total": i6d_evidence.get("total"),
+            "unexecuted": len(i6d_evidence.get("unexecuted") or []),
+            "skipped": len(i6d_evidence.get("skipped") or []),
+        }
+        if i6d_evidence.get("verdict") == "unexecuted_assertions":
+            for entry in i6d_evidence.get("unexecuted") or []:
+                findings.append({
+                    "severity": "fail",
+                    "code": "unexecuted_assertions",
+                    "path": entry.get("file"),
+                    "line": entry.get("line"),
+                    "test": entry.get("test"),
+                    "source": entry.get("source"),
+                    "message": "An assertion added/changed by this diff never "
+                    "executed during the green run; it must not count as green.",
+                })
+        elif i6d_evidence.get("verdict") == "pytest_unavailable":
+            findings.append({
+                "severity": "fail",
+                "code": "i6d_pytest_unavailable",
+                "message": "The I6d assertion-execution gate could not run: "
+                "pytest is unavailable, so added/changed assertions could "
+                "not be proven executed.",
+                "assertions_at_stake": i6d_evidence.get("total"),
+            })
+
     failed = any(finding.get("severity") == "fail" for finding in findings)
     verdict = "failed" if failed else "passed"
     proof = {
@@ -354,6 +399,7 @@ def main() -> None:
         "code_files": code_files,
         "test_files": test_files,
         "read_cache": _read_cache.stats(),
+        "i6d": i6d_summary,
         "findings": findings,
         "recorded_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -368,6 +414,7 @@ def main() -> None:
         "tdd_mode": mode,
         "proof_file": str(proof_file),
         "read_cache": _read_cache.stats(),
+        "i6d": i6d_summary,
         "failures": sum(1 for finding in findings if finding.get("severity") == "fail"),
         "warnings": sum(1 for finding in findings if finding.get("severity") == "warn"),
         "failed_codes": [

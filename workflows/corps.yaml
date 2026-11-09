@@ -398,10 +398,13 @@ phases:
         with: { phase: "green", test_command: "${input.tdd_green_command}", expect: "pass" }
       - id: I6b.tdd.proof_validate
         with: { phase: "green", tdd_mode: "${input.tdd_mode}" }
+      - id: I6d.tdd.assertion_execution
+        with: { only_changed: true, include_uncommitted: true }
       - id: I6c.tdd.quality_review
         with: { tdd_mode: "${input.tdd_mode}" }
     artifacts:
       - { path: "specs/changes/${change_id}/tdd/green-0.json", optional: false }
+      - { path: "specs/changes/${change_id}/tdd/i6d-0.json", optional: false }
       - { path: "specs/changes/${change_id}/tdd/quality-0.json", optional: false }
     gate:
       type: artifact-verify
