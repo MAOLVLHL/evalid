@@ -1,5 +1,19 @@
 # Release Notes
 
+## 0.5.17 - I6d assertion-execution gate (milestone M3 accepted)
+
+Patch release. Three merged PRs since 0.5.16, all verified end to end in CI and locally.
+
+**M3 slice 3: I6d wired into `xflow audit` replay and the I6c gate (#89).** When an audited diff touches Python test files, the audit now runs the I6d gate in the scratch clone: an unexecuted assertion inside the diff flips the verdict to `mismatch` even when the replay itself is fully green; repos without the I6d plugin are unaffected. The I6c gate folds the same evidence into fail findings naming each unexecuted assertion. Test evidence: local full `npm test` 496 tests / 495 pass / 0 fail / 1 skipped (pre-existing); merged main CI run 42551898032 success.
+
+**M3 slice 4: acceptance demo (#90).** `scripts/demo-i6d-gate.sh` proves the gate through the real `xflow audit` CLI with a RED/GREEN double control — RED: a never-called callback's `assert value == 42` with a claimed all-green pytest run is judged `mismatch`, exit 1, `i6d: unexecuted_assertions`; GREEN: only really-executed assertions are judged `verified`, exit 0, `i6d: pass`. Test evidence: new test `test/i6d-acceptance-demo.test.js` 1/1 pass; `test/xflow-audit.test.js` 15/15 pass; local full `npm test` 511 tests / 510 pass / 0 fail / 1 skipped (pre-existing); merged main CI run 42557796622 success.
+
+**Concurrency policy test coverage, external contribution (#88, closes #87).** 14 new tests in `test/concurrency-policy.test.js` covering `createConcurrencyPolicy()` limits, weights and overrides; no production code changed. Test evidence: contributor ran the new file 14/14 pass; full-suite verification after merge comes from main CI run 42556898257 success.
+
+**Milestone M3 "I6d assertion-execution gate" — accepted.** Evidence in issue #69, comment 6731688418: the slice-4 demo proves the acceptance standard end to end — every new/changed assertion must actually execute during the green run, and an unexecuted assertion does not count as green. The demo script is in main and locked into the suite; the #69 checklist box is ticked.
+
+Acceptance debt, stated plainly: the bench-number acceptance for P1-2, P1-3, P2-1 and P2-3 — the wall-clock/token/resolved lines from issue #5 — still awaits the MiniMax full-matrix batch (15 instances × 4 arms × reps 3), which is stopped on MiniMax Token Plan quota exhaustion. No bench numbers are claimed in this release.
+
 ## 0.5.16 - M3 slices 1–2: pytest assertion-execution tracking, diff-scoped (milestone M3 not yet accepted)
 
 Patch release. Two merged slices since 0.5.15, both verified end to end in CI and locally.
