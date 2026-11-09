@@ -80,10 +80,14 @@ phases:
       type: artifact-verify
       on_fail: stop
 
+  # M4 lite fast track (evalid #97): this whole phase is spec ritual — a
+  # `--lite` run skips it (executor logs phase_skipped, reason lite_track)
+  # and keeps the verification spine (tdd seal + i6d + J1 + J6).
   - id: proposal-consistency-check
     label: "07 · Proposal consistency check"
     catalog_ref: 7
     required: true
+    lite_skip: true
     atoms:
       - id: J4a.spec_consistency.structural
       - id: J4d.spec_clarify.gate
@@ -205,8 +209,14 @@ phases:
     required: true
     atoms:
       - id: J1.tests.run
+      # M4 lite fast track (evalid #97): J4a/J4b are spec ritual — a `--lite`
+      # run skips them (atom_skipped, reason lite_track) and the phase's
+      # deterministic J4a gate passes with verdict lite_skipped. J1 (full
+      # test run) and J6 (code review) stay: they are verification, not ritual.
       - id: J4a.spec_consistency.structural
+        lite_skip: true
       - id: J4b.spec_delta.review
+        lite_skip: true
       - id: J6.cr.review
       - id: B3.status.transition
         with: { to_stage: "verify" }

@@ -40,6 +40,10 @@
           "label": { "type": "string" },
           "catalog_ref": { "type": "integer", "minimum": 1, "maximum": 27 },
           "required": { "type": "boolean" },
+          "lite_skip": {
+            "type": "boolean",
+            "description": "M4 lite fast track: skip this whole phase when the run has input.lite=true (spec ritual only; the verification spine never carries this flag)"
+          },
           "condition": {
             "type": "object",
             "description": "Skip phase unless condition met",
@@ -56,6 +60,10 @@
               "properties": {
                 "id": { "type": "string" },
                 "with": { "type": "object" },
+                "lite_skip": {
+                  "type": "boolean",
+                  "description": "M4 lite fast track: skip this atom when the run has input.lite=true (spec ritual atoms only; a deterministic gate on a lite-skipped atom passes with verdict lite_skipped)"
+                },
                 "parallel_group": { "type": "string" },
                 "parallel_weight": { "type": "integer", "minimum": 1, "maximum": 16 }
               }

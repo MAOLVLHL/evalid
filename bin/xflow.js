@@ -6692,6 +6692,11 @@ Commands:
   validate <yaml|yolo|corps>  Validate workflow YAML as preflight only
 
 Options:
+  --lite                  M4 lite fast track: skip spec-ritual steps
+                          (proposal-consistency-check phase, J4a/J4b atoms)
+                          and keep seal + replay only. Run the classifier
+                          first (python3 xflow/atoms/lite_track.py --repo .)
+                          and add --lite only when it says lite.
   help, -h, --help Show this help message
 `);
 }

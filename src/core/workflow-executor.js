@@ -11,6 +11,14 @@
  *
  * E6 ≡ E1+E2 invariant enforced: executor routes ALL deterministic gate checks
  * through E6.gate.local_precheck Python atom, never re-implementing logic here.
+ *
+ * M4 lite fast track (evalid #97): when input.lite is true, phases and atoms
+ * marked `lite_skip: true` in the workflow YAML are skipped (the spec ritual:
+ * J4a/J4b/J4d), while the verification spine (TDD run + proof seal + i6d
+ * gate + full test run + CR review) still runs. Skips are logged as
+ * `phase_skipped` / `atom_skipped` with reason `lite_track`, and a
+ * deterministic gate whose gate atom is lite-skipped passes with verdict
+ * `lite_skipped` instead of re-running the spec check.
  */
 
 import { existsSync, statSync, writeFileSync, readFileSync, mkdirSync } from 'fs';
@@ -67,6 +75,13 @@ export class WorkflowExecutor {
 
   // ─── Main execution loop ─────────────────────────────────────────────────
 
+  // M4 lite fast track: explicit `--lite` input only (the classifier in
+  // xflow/atoms/lite_track.py is the decision procedure; this flag is the
+  // enforcement switch). No silent auto-switching.
+  isLiteFastTrack() {
+    return this.input?.lite === true;
+  }
+
   // ─── Phase cost accounting ─────────────────────────────────────────────
 
   recordPhaseCost(phase, status, startedAtMs) {
@@ -121,6 +136,7 @@ export class WorkflowExecutor {
       workflow_run_id: this.runtime.workflowRunId,
       workflow: this.workflow.name,
       track: this.workflow.track,
+      lite_fast_track: this.isLiteFastTrack(),
       workflow_integrity: this.workflowManifest,
       max_parallel_agents: this.maxParallelAgents,
       parallel_policy: this.concurrencyPolicy.mode,
@@ -189,6 +205,28 @@ export class WorkflowExecutor {
         }
       }
 
+      // M4 lite fast track: skip whole phases marked lite_skip (the spec
+      // ritual). Logged like a condition skip so proof still sees the phase
+      // as accounted for; the reason distinguishes the two.
+      if (phase.lite_skip && this.isLiteFastTrack()) {
+        console.log(`  ↷ Skipping (lite fast track: phase "${phase.id}" is spec ritual)`);
+        await this.logExecutionEvent('phase_skipped', {
+          workflow_run_id: this.runtime.workflowRunId,
+          workflow: this.workflow.name,
+          track: this.workflow.track,
+          phase_id: phase.id,
+          phase_label: phase.label || null,
+          phase_index: i,
+          reason: 'lite_track',
+          change_id: this.changeId || null,
+          mission_id: this.runtime.missionId || null,
+          workflow_integrity_digest: this.workflowManifest.digest,
+        });
+        this.recordPhaseCost(phase, 'skipped', phaseStartedAtMs);
+        this.saveState({ ...state, last_completed_phase: phase.id });
+        continue;
+      }
+
       // Preconditions
       if (phase.preconditions?.length > 0) {
         const precondOk = this.checkPreconditions(phase.preconditions);
@@ -203,12 +241,33 @@ export class WorkflowExecutor {
         this.ensurePlanArtifact();
       }
 
-      // Run atoms
+      // Run atoms (M4 lite: atoms marked lite_skip are filtered out first
+      // and logged individually, so mixed phases keep their spine).
       const atomsToRun = rerunRequest?.phase_id === phase.id && rerunRequest?.atom_id
         ? (phase.atoms || []).filter((atomRef) => atomRef.id === rerunRequest.atom_id)
         : (phase.atoms || []);
-      if (atomsToRun.length > 0) {
-        for (const batch of this.buildAtomBatches(atomsToRun)) {
+      const runnableAtoms = [];
+      for (const atomRef of atomsToRun) {
+        if (atomRef.lite_skip && this.isLiteFastTrack()) {
+          console.log(`  ↷ Skipping atom (lite fast track): ${atomRef.id}`);
+          await this.logExecutionEvent('atom_skipped', {
+            workflow_run_id: this.runtime.workflowRunId,
+            workflow: this.workflow.name,
+            track: this.workflow.track,
+            phase_id: phase.id,
+            phase_label: phase.label || null,
+            atom_id: atomRef.id,
+            reason: 'lite_track',
+            change_id: this.changeId || null,
+            mission_id: this.runtime.missionId || null,
+            workflow_integrity_digest: this.workflowManifest.digest,
+          });
+          continue;
+        }
+        runnableAtoms.push(atomRef);
+      }
+      if (runnableAtoms.length > 0) {
+        for (const batch of this.buildAtomBatches(runnableAtoms)) {
           this.ensureNotAborted();
           const results = batch.parallel
             ? await this.runParallelBatch(batch.atoms, phase)
@@ -291,6 +350,7 @@ export class WorkflowExecutor {
       workflow_run_id: this.runtime.workflowRunId,
       workflow: this.workflow.name,
       track: this.workflow.track,
+      lite_fast_track: this.isLiteFastTrack(),
       workflow_integrity: this.workflowManifest,
       change_id: this.changeId || null,
       mission_id: this.runtime.missionId || null,
@@ -567,6 +627,12 @@ export class WorkflowExecutor {
 
     switch (gate.type) {
       case 'deterministic': {
+        // M4 lite: a gate whose atom is lite-skipped in this phase must not
+        // re-run the spec check it gates — the skip is the verdict.
+        if (gate.atom && this.isLiteFastTrack()
+          && (phase.atoms || []).some((atomRef) => atomRef.id === gate.atom && atomRef.lite_skip)) {
+          return { ok: true, verdict: 'lite_skipped' };
+        }
         // Route through E6 (Python) for ALL structural checks — invariant enforced
         if (gate.atom) {
           const result = await this.runAtom({ id: gate.atom, with: gate.with }, phase);
