@@ -32,6 +32,10 @@ inputs:
     description: 'Pull request number to comment on. Empty means auto-detect from the event payload or ref.'
     required: false
     default: ''
+  sarif-out:
+    description: 'Path to a SARIF file for the verdict (relative to project-root). The verdict is merged into it, so a loop over several proofs accumulates one file for upload-sarif. Empty means no SARIF export.'
+    required: false
+    default: ''
 outputs:
   ok:
     description: 'true when the proof seal verifies and the replay matches the claim.'
@@ -41,6 +45,10 @@ outputs:
     description: 'true when the ledger comment was posted or updated on the pull request.'
   comment_url:
     description: 'URL of the ledger comment, when posted.'
+  sarif_path:
+    description: 'Path of the SARIF file the verdict was merged into, when sarif-out is set.'
+  sarif_written:
+    description: 'true when the verdict was merged into the SARIF file.'
 runs:
   using: 'node22'
   main: 'action/verify-proof.mjs'

@@ -15,6 +15,12 @@
  * is reported in the JSON output but never changes the exit code, which
  * stays driven by the proof alone.
  *
+ * With --sarif-out <path> it also exports the verdict as SARIF
+ * (action/sarif.mjs, issue #73), merging into the file so a workflow loop
+ * over several proofs accumulates one SARIF document for upload-sarif.
+ * A valid proof exports zero results, which dismisses an alert a previous
+ * push of the same PR raised. The export is best-effort like the comment.
+ *
  * Usage as an action (see action.yml):
  *   uses: surlymochan/evalid@v0.5.x
  *   with:
@@ -29,7 +35,7 @@
  * (missing change-id, validator not found, python spawn failure).
  */
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -40,12 +46,22 @@ import {
   renderLedger,
   resolvePrNumber,
 } from './ledger-comment.mjs';
+import { buildSarif, mergeSarifForProof } from './sarif.mjs';
 
 export const VALIDATOR_RELATIVE_PATH = 'xflow/atoms/i6b_tdd_proof_validate.py';
 
 export function defaultActionDir() {
   if (process.env.GITHUB_ACTION_PATH) return process.env.GITHUB_ACTION_PATH;
   return resolve(dirname(fileURLToPath(import.meta.url)), '..');
+}
+
+/** evalid version from the repo package.json; '0.0.0' when unreadable. */
+export function readPackageVersion(actionDir) {
+  try {
+    return JSON.parse(readFileSync(resolve(actionDir, 'package.json'), 'utf8')).version || '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
 }
 
 /** Parse the validator's JSON verdict out of its stdout (last JSON line wins). */
@@ -168,8 +184,56 @@ function writeGithubOutputs(result) {
   if (!outputFile) return;
   appendFileSync(
     outputFile,
-    `ok=${result.ok}\nverdict=${result.verdict}\ncomment_posted=${result.comment_posted === true}\ncomment_url=${result.comment_url || ''}\n`,
+    `ok=${result.ok}\nverdict=${result.verdict}\ncomment_posted=${result.comment_posted === true}\ncomment_url=${result.comment_url || ''}\nsarif_written=${result.sarif_written === true}\nsarif_path=${result.sarif_path || ''}\n`,
   );
+}
+
+/**
+ * Export the verdict as SARIF for code scanning (issue #73).
+ * Best-effort like the ledger comment: a failed write is reported in
+ * the JSON output but never changes the exit code, which stays driven
+ * by the proof alone. Merging is an upsert keyed on the proof, so a
+ * workflow loop over several proofs accumulates one SARIF file and a
+ * re-run replaces (never duplicates) its own alert. Returns
+ * { written, path, error }.
+ */
+export function exportSarifForResult(result, options = {}) {
+  const {
+    projectRoot = process.cwd(),
+    actionDir = defaultActionDir(),
+    changeId = '',
+    phase = 'green',
+    attempt = 0,
+    sarifOut = '',
+    repo = process.env.GITHUB_REPOSITORY || '',
+  } = options;
+
+  if (!sarifOut) return { written: false, path: '', error: 'sarif-out not set' };
+  const runUrl = process.env.GITHUB_RUN_ID && repo
+    ? `https://github.com/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`
+    : '';
+  try {
+    const payload = parseVerdict(result.stdout) || { ok: result.ok, verdict: result.verdict };
+    const document = buildSarif({
+      changeId,
+      phase,
+      attempt,
+      payload,
+      version: readPackageVersion(actionDir),
+      runUrl,
+      repo,
+    });
+    const path = resolve(projectRoot, sarifOut);
+    mergeSarifForProof({
+      sarifPath: path,
+      document,
+      proof: { changeId, phase, attempt },
+      version: readPackageVersion(actionDir),
+    });
+    return { written: true, path, error: '' };
+  } catch (err) {
+    return { written: false, path: '', error: String(err?.message || err) };
+  }
 }
 
 /**
@@ -263,15 +327,28 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     apiBase: args.api_base || process.env.GITHUB_API_URL || 'https://api.github.com',
   });
   const payload = parseVerdict(result.stdout) || { ok: result.ok, verdict: result.verdict };
+  const sarif = exportSarifForResult(result, {
+    projectRoot: args.project_root || process.cwd(),
+    actionDir: args.action_dir || defaultActionDir(),
+    changeId: args.change_id || '',
+    phase: args.phase || 'green',
+    attempt: args.attempt === undefined ? 0 : Number(args.attempt),
+    sarifOut: args.sarif_out || '',
+    repo: args.repo || process.env.GITHUB_REPOSITORY || '',
+  });
   const output = {
     ...payload,
     comment_posted: ledger.posted,
     comment_url: ledger.url,
+    sarif_written: sarif.written,
+    sarif_path: sarif.path,
   };
   if (ledger.error) output.comment_error = ledger.error;
+  if (sarif.error && args.sarif_out) output.sarif_error = sarif.error;
   process.stdout.write(`${JSON.stringify(output)}\n`);
   if (result.stderr) process.stderr.write(result.stderr);
   if (ledger.error) process.stderr.write(`ledger comment: ${ledger.error}\n`);
-  writeGithubOutputs({ ...result, comment_posted: ledger.posted, comment_url: ledger.url });
+  if (sarif.error && args.sarif_out) process.stderr.write(`sarif export: ${sarif.error}\n`);
+  writeGithubOutputs({ ...result, comment_posted: ledger.posted, comment_url: ledger.url, sarif_written: sarif.written, sarif_path: sarif.path });
   process.exit(result.exitCode);
 }

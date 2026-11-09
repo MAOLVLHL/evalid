@@ -3,12 +3,17 @@ name: Proof ledger
 # Dogfoods the evalid Action on this repo's own PRs (issue #73):
 # every sealed TDD proof added or changed by a PR is verified in CI and
 # its claim-vs-evidence ledger is posted as a PR comment (upserted on a
-# stable marker, so re-runs update the same comment).
+# stable marker, so re-runs update the same comment). Each verdict is
+# also exported as SARIF and uploaded to code scanning, so a broken seal
+# shows up as an alert in the Security tab; a valid proof uploads zero
+# results, which dismisses an alert a previous push of the same PR raised.
 #
-# - valid proof  -> green check + ✅ ledger comment
+# - valid proof  -> green check + ✅ ledger comment, no alert
 # - broken seal  -> red check + ❌ ledger comment naming the breakage point
 #   (binding mismatch, snapshot drift, green-tree drift, replay mismatch)
-# - no sealed proof in the PR -> job succeeds, nothing posted
+#   + a code scanning alert (stable partialFingerprint, so re-runs of the
+#   same proof update the alert instead of opening a duplicate)
+# - no sealed proof in the PR -> job succeeds, nothing posted, no upload
 
 on:
   pull_request:
@@ -17,6 +22,10 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  # SARIF upload needs security-events: write. Fork PRs run with a
+  # read-only token, so the upload step is continue-on-error there —
+  # the ledger check must not go red for a fork's missing permission.
+  security-events: write
 
 jobs:
   ledger:
@@ -56,8 +65,20 @@ jobs:
               --project-root . \
               --change-id "$change_id" \
               --phase "$phase" \
-              --attempt "$attempt"; then
+              --attempt "$attempt" \
+              --sarif-out evalid-proof.sarif; then
               failed=1
             fi
           done
           exit "$failed"
+
+      - name: Upload SARIF to code scanning
+        # Runs even when a proof failed (that is when there is an alert
+        # to upload); skipped when no proof was verified (no SARIF file).
+        if: ${{ always() && hashFiles('evalid-proof.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: evalid-proof.sarif
+        # Fork PRs cannot upload (read-only token): keep the ledger job
+        # green for them; same-repo PRs upload for real.
+        continue-on-error: true
