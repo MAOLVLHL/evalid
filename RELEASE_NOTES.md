@@ -1,5 +1,19 @@
 # Release Notes
 
+## 0.5.19 - M4 lite fast track, slices 1–2 (milestone M4 not yet accepted)
+
+Patch release. Two merged PRs since 0.5.18, both verified end to end in CI and locally.
+
+**M4 slice 1: lite fast-track classifier and `--lite` switch (#98).** `xflow/atoms/lite_track.py` classifies a diff `lite` / `full` against the merge-base; thresholds `max_files = 10`, `max_lines = 300`; any touch under `specs/` or `workflows/` forces `full`; empty diff is `lite`. `xflow workflow run` gains an explicit `--lite` flag — the classifier decides, no silent auto-switching. Executor `lite_skip` skips the spec ritual in a `--lite` run (`proposal-consistency-check` phase, `J4a` / `J4b` atoms) and logs the skips; kept in lite mode: TDD run + proof seal + i6d gate, full test run (`J1`), code review (`J6`), and `xflow audit` replay. Test evidence: 11 new tests in `test/lite-track.test.js` RED→GREEN; full `npm run verify` exit 0 (58 test files); PR CI runs verify 42664527969 and ledger 42664528087 both pass; merged main CI run 42665066351 success.
+
+**M4 slice 2: lite acceptance demo + wall-clock preliminary numbers (#99).** `test/lite-track-acceptance.test.js` proves the lite track end to end through the real executor and real `workflows/yolo.yaml` (dogfood fix: `classify_repo --uncommitted` overcounted partially reverted lines — now reads the worktree diff against the base directly; regression test, 11/12 pass without the fix). Lite run: `proposal-consistency-check` skipped (reason `lite_track`), `J4a` / `J4b` skipped, `verify-consistency` gate passed with verdict `lite_skipped`, `lite_fast_track: true`; seal + clean replay (red proof `passed: false`, green proof `passed: true`, I6b validated both); I6d, I6c, J1 and J6 passed in both tracks. Full-track control ran all spec atoms, `lite_fast_track: false`. Classifier controls: 2-file fix → `lite`; 400-line addition → `full`; one-line `specs/` touch → `full`. Test evidence: 2 new tests RED→GREEN; full `npm run verify` exit 0 — 59 test files, 536 tests, 535 pass, 0 fail (1 pre-existing todo); PR CI verify and ledger both pass; merged main CI run 42689050732 success.
+
+Wall clock, stated plainly as preliminary (docs/evidence/m4-slice2-wallclock.md, n=1 per track, same demo flow, Linux VM / node v24.22.1 / python 3.12.3): standalone acceptance test lite 5,050 ms vs full 6,330 ms (ratio 0.798); inside `npm run verify` lite 10,420 ms vs full 16,191 ms (ratio 0.644). The two runs disagree by ~0.15 on the ratio minutes apart on the same machine — that spread is why these numbers are preliminary. The formal ≤1.3× verdict for issue #5 P1-2 waits for the bench full-matrix numbers; P1-2 stays unticked, and this release makes no ≤1.3× claim.
+
+**Milestone M4 "lite fast track" — not yet accepted.** Slices 1 and 2 are merged checkpoints only; the end-to-end acceptance evidence (real small change through `--lite`, real large change judged `full`, wall-clock verdict from bench numbers) is not yet in place.
+
+Acceptance debt, stated plainly: the bench-number acceptance for P1-2, P1-3, P2-1 and P2-3 — the wall-clock/token/resolved lines from issue #5 — still awaits the MiniMax full-matrix batch (15 instances × 4 arms × reps 3), which is still running. No bench numbers are claimed in this release.
+
 ## 0.5.18 - Proof verdicts as SARIF for code scanning (issue #73 closed)
 
 Patch release. One merged PR since 0.5.17, verified end to end in CI and locally, with the Security-tab acceptance evidence from a demo PR.
