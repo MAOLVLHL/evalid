@@ -1,5 +1,15 @@
 # Release Notes
 
+## 0.5.18 - Proof verdicts as SARIF for code scanning (issue #73 closed)
+
+Patch release. One merged PR since 0.5.17, verified end to end in CI and locally, with the Security-tab acceptance evidence from a demo PR.
+
+**Export proof verdicts as SARIF for code scanning (#92, closes #73).** Sealed-proof failures now surface as code scanning alerts, not just a red check and a PR comment. `action/sarif.mjs` maps each proof-failure verdict to a SARIF 2.1.0 rule (binding / snapshot / green-tree / reexec failures at error level; skipped-tests and unknown-counts at warning), one result per named file, with stable fingerprints so re-runs update the existing alert instead of duplicating it and a valid proof clears its alert. `verify-proof.mjs` gains `--sarif-out`, and `proof-ledger.yml` uploads the SARIF per proof (fires exactly when a proof failed; fork PRs stay green). Test evidence: 11 new tests in `test/github-action-sarif.test.js`; PR CI runs verify 42567046823 and ledger 42567046908 both pass; merged main CI run 42567609280 success.
+
+**Issue #73 — closed with end-to-end evidence** (demo PR #94, closed unmerged): a sealed green proof with a tampered `test/demo-sarif.test.js` went red — ledger run 42568411445 fail, verdict `green_tree_mismatch`, files `[test/demo-sarif.test.js]` only; SARIF upload success, analysis 2124250892 (results_count 1), code scanning alert #1 visible in the Security tab (rule `evalid/green-tree-mismatch`, severity error). A re-run opened no duplicate alert, and restoring the test file cleared it — ledger run 42568823086 pass, verdict `valid`, analysis 2124265677 (results_count 0), alert #1 state `fixed` on refs/pull/94/merge. A green PR produces no alert (main branch alerts 0).
+
+Acceptance debt, stated plainly: the bench-number acceptance for P1-2, P1-3, P2-1 and P2-3 — the wall-clock/token/resolved lines from issue #5 — still awaits the MiniMax full-matrix batch (15 instances × 4 arms × reps 3), which is stopped on MiniMax Token Plan quota exhaustion. No bench numbers are claimed in this release.
+
 ## 0.5.17 - I6d assertion-execution gate (milestone M3 accepted)
 
 Patch release. Three merged PRs since 0.5.16, all verified end to end in CI and locally.

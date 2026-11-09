@@ -3,6 +3,15 @@
 All notable changes to this project are documented here. Detailed notes live in
 [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## [0.5.18] - 2026-11-09
+
+### Added
+- **Export proof verdicts as SARIF for code scanning (#92, closes #73)**: sealed-proof failures now surface as code scanning alerts, not just a red check and a PR comment. `action/sarif.mjs` maps each proof-failure verdict to a SARIF 2.1.0 rule — binding_mismatch / snapshot_mismatch / green_tree_mismatch / reexec_* and the other validator failures (level error; warning for tests_skipped_or_todo / tests_counts_unknown) — one result per named file (file-level location; the validator records no line numbers), degrading to the proof file itself when a verdict has no file location. Stable `partialFingerprints` (`change-id/phase/attempt/verdict/file`) so re-runs of the same proof update the existing alert instead of opening a duplicate; merging upserts per proof, so a valid proof clears its alert. `valid` / `not_required` / infrastructure verdicts produce zero results. `verify-proof.mjs` gains `--sarif-out <path>` (with matching `sarif-out` input and `sarif_path` / `sarif_written` outputs in action.yml); `proof-ledger.yml` passes `--sarif-out evalid-proof.sarif` per proof and uploads with `github/codeql-action/upload-sarif` (`security-events: write`; upload runs on `always()` so it fires exactly when a proof failed, and is `continue-on-error` so fork PRs stay green). Test evidence: 11 new tests in `test/github-action-sarif.test.js` (verdict→rule mapping + levels, per-file locations, no-file degradation, fingerprint stability, merge upsert / valid-clears-alert, SARIF 2.1.0 shape, action.yml declarations, CLI end-to-end on a real sealed proof); PR CI runs verify 42567046823 and ledger 42567046908 both pass; merged main CI run 42567609280 success.
+
+Issue #73 — **closed with end-to-end evidence** (comment 2026-11-09T05:46:16Z, demo PR #94, closed unmerged): a sealed green proof with a tampered `test/demo-sarif.test.js` went red — ledger run 42568411445 fail, verdict `green_tree_mismatch`, files `[test/demo-sarif.test.js]` only; SARIF upload success, analysis 2124250892 (results_count 1), code scanning alert #1 visible in the Security tab (rule `evalid/green-tree-mismatch`, severity error). Re-run (attempt 2, analysis 2124258699) opened no duplicate alert, and the same fingerprint from the earlier demo PR #93 did not create a new alert either. Restoring the test file cleared it — ledger run 42568823086 pass, verdict `valid`, analysis 2124265677 (results_count 0), alert #1 state `fixed` on refs/pull/94/merge. A green PR produces no alert (PR #92 itself has no sealed proof: no SARIF upload, no analysis; main branch alerts 0).
+
+Acceptance debt, stated plainly: the bench-number acceptance for P1-2 / P1-3 / P2-1 / P2-3 still awaits the MiniMax full-matrix batch (15 instances × 4 arms × reps 3), which is stopped on MiniMax Token Plan quota exhaustion. No bench numbers are claimed in this release.
+
 ## [0.5.17] - 2026-11-09
 
 ### Added
