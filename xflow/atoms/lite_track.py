@@ -137,24 +137,41 @@ def _verdict(files, added, removed, max_files, max_lines):
     ), []
 
 
+def _numstat_worktree(repo, base_sha):
+    """``{relpath: (added, removed)}`` from ``git diff --numstat`` of the
+    working tree (staged + unstaged) against ``base_sha``.
+
+    Binary files report ``-`` counts; they count as a touched file with
+    zero counted lines.
+    """
+    raw = _git(repo, "diff", "--numstat", base_sha, "--")
+    stats = {}
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        added_s, removed_s, path = line.split("\t", 2)
+        stats[path] = (
+            0 if added_s == "-" else int(added_s),
+            0 if removed_s == "-" else int(removed_s),
+        )
+    return stats
+
+
 def classify_repo(repo, base="main", max_files=DEFAULT_MAX_FILES,
                   max_lines=DEFAULT_MAX_LINES, uncommitted=False):
     """Classify the committed (or, with ``uncommitted``, working-tree) diff."""
     base_sha = resolve_diff_base(repo, base)
     _, changed = changed_lines(repo, base, uncommitted=uncommitted)
-    stats = _numstat(repo, base_sha)
     if uncommitted:
-        # changed_lines(..., uncommitted=True) unions the working tree; the
-        # numstat side must match it or deletion-only worktree edits vanish.
-        raw_wt = _git(repo, "diff", "--numstat", "HEAD", "--")
-        for line in raw_wt.splitlines():
-            if not line.strip():
-                continue
-            added_s, removed_s, path = line.split("\t", 2)
-            a = 0 if added_s == "-" else int(added_s)
-            r = 0 if removed_s == "-" else int(removed_s)
-            prev_a, prev_r = stats.get(path, (0, 0))
-            stats[path] = (max(prev_a, a), max(prev_r, r))
+        # changed_lines(..., uncommitted=True) unions the working tree, so
+        # the numstat side must measure that same union: the worktree diff
+        # against the base. Merging the committed and worktree numstats
+        # with max() overcounts whenever the worktree partially reverts
+        # committed lines (a branch that added 10 lines, cut back by 5 in
+        # the worktree, read as 15 changed lines instead of the true 5).
+        stats = _numstat_worktree(repo, base_sha)
+    else:
+        stats = _numstat(repo, base_sha)
     files = sorted(stats)
     added = sum(a for a, _ in stats.values())
     removed = sum(r for _, r in stats.values())

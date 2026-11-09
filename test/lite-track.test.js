@@ -332,3 +332,35 @@ describe('WorkflowExecutor lite fast track (M4 slice 1)', () => {
     }
   });
 });
+
+// ─── --uncommitted regression (M4 slice 2, evalid #97) ──────────────────────
+
+describe('lite_track --uncommitted counting (M4 slice 2)', () => {
+  test('worktree that partially reverts committed lines counts the true diff', () => {
+    const dir = makeRepo();
+    try {
+      // Base file: 10 lines. The branch commits 10 added lines; the
+      // worktree then cuts 5 of them back. The true worktree-vs-base diff
+      // is 5 added, 0 removed — the pre-fix max() merge reported 15.
+      const ten = Array.from({ length: 10 }, (_, i) => `line${i + 1}`).join('\n') + '\n';
+      writeFileSync(join(dir, 'a.txt'), ten);
+      git(dir, 'add', '.');
+      git(dir, 'commit', '-qm', 'ten lines');
+      git(dir, 'checkout', '-qb', 'feature');
+      const twenty = Array.from({ length: 20 }, (_, i) => `line${i + 1}`).join('\n') + '\n';
+      writeFileSync(join(dir, 'a.txt'), twenty);
+      git(dir, 'add', '.');
+      git(dir, 'commit', '-qm', 'add 10 lines');
+      const kept = Array.from({ length: 15 }, (_, i) => `line${i + 1}`).join('\n') + '\n';
+      writeFileSync(join(dir, 'a.txt'), kept);
+      const verdict = classify(dir, ['--uncommitted']);
+      assert.equal(verdict.track, 'lite');
+      assert.equal(verdict.files, 1);
+      assert.equal(verdict.added, 5);
+      assert.equal(verdict.removed, 0);
+      assert.equal(verdict.total, 5);
+    } finally {
+      cleanup(dir);
+    }
+  });
+});
