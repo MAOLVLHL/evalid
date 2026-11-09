@@ -364,3 +364,111 @@ describe('lite_track --uncommitted counting (M4 slice 2)', () => {
     }
   });
 });
+
+// ─── generated change artifacts (M4 slice 4, evalid #103) ───────────────────
+// The workflow rewrites specs/changes/<id>/status.json on every run (stage
+// transitions, integrity block: +268 lines in the M4 demo). A resume that
+// re-measures the worktree must not flip an auto-lite change to full on
+// the workflow's own state, and those lines must not inflate the budget.
+
+function seedChangeDir(dir, files) {
+  for (const [name, content] of Object.entries(files)) {
+    const path = join(dir, name);
+    mkdirSync(join(dir, name.split('/').slice(0, -1).join('/') || '.'), { recursive: true });
+    writeFileSync(path, content);
+  }
+  git(dir, 'add', '.');
+  git(dir, 'commit', '-qm', 'seed change dir');
+}
+
+describe('lite_track generated change artifacts (M4 slice 4)', () => {
+  test('tracked status.json churn beside a small fix still classifies lite', () => {
+    const dir = makeRepo();
+    try {
+      seedChangeDir(dir, {
+        'specs/changes/chg-demo/status.json': JSON.stringify({ change_id: 'chg-demo', current_stage: 'change-init' }, null, 2) + '\n',
+      });
+      writeFileSync(join(dir, 'a.txt'), 'line1\nline2\n');
+      const churned = JSON.stringify({
+        change_id: 'chg-demo',
+        current_stage: 'verify',
+        completed_phases: ['tdd-red', 'tdd-green', 'verify-consistency'],
+        history: Array.from({ length: 260 }, (_, i) => `phase step ${i}`),
+      }, null, 2) + '\n';
+      writeFileSync(join(dir, 'specs/changes/chg-demo/status.json'), churned);
+      const verdict = classify(dir, ['--uncommitted']);
+      assert.equal(verdict.track, 'lite');
+      assert.equal(verdict.files, 1, 'status.json must not count as a changed file');
+      assert.equal(verdict.total, 1, 'status.json lines must not inflate the budget');
+      assert.deepEqual(verdict.force_full, []);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test('generated proof artifacts beside a small fix still classify lite', () => {
+    const dir = makeRepo();
+    try {
+      seedChangeDir(dir, {
+        'specs/changes/chg-demo/status.json': '{}\n',
+        'specs/changes/chg-demo/tdd/red-0.json': '{}\n',
+        'specs/changes/chg-demo/cr/review-0.json': '{}\n',
+        'specs/changes/chg-demo/verify_proof.json': '{}\n',
+        'specs/changes/chg-demo/spec_delta_review.md': '# review\n',
+      });
+      writeFileSync(join(dir, 'a.txt'), 'line1\nline2\n');
+      for (const name of ['tdd/red-0.json', 'cr/review-0.json', 'verify_proof.json', 'spec_delta_review.md']) {
+        const path = join(dir, 'specs/changes/chg-demo', name);
+        writeFileSync(path, `${readFileSync(path, 'utf8')}${'x\n'.repeat(40)}`);
+      }
+      writeFileSync(join(dir, 'specs/changes/chg-demo/status.json'), `${'y\n'.repeat(40)}`);
+      const verdict = classify(dir, ['--uncommitted']);
+      assert.equal(verdict.track, 'lite');
+      assert.equal(verdict.files, 1, 'generated artifacts must not count as changed files');
+      assert.equal(verdict.total, 1);
+      assert.deepEqual(verdict.force_full, []);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test('a human proposal.md touch still forces full beside generated churn', () => {
+    const dir = makeRepo();
+    try {
+      seedChangeDir(dir, {
+        'specs/changes/chg-demo/status.json': '{}\n',
+        'specs/changes/chg-demo/proposal.md': '# proposal\n',
+      });
+      writeFileSync(join(dir, 'a.txt'), 'line1\nline2\n');
+      writeFileSync(join(dir, 'specs/changes/chg-demo/status.json'), `${'y\n'.repeat(40)}`);
+      writeFileSync(join(dir, 'specs/changes/chg-demo/proposal.md'), '# proposal\n\nExtra line.\n');
+      const verdict = classify(dir, ['--uncommitted']);
+      assert.equal(verdict.track, 'full');
+      assert.deepEqual(verdict.force_full, ['specs/changes/chg-demo/proposal.md']);
+      assert.match(verdict.reason, /specs\//);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test('committed status.json churn on a branch still classifies lite', () => {
+    const dir = makeRepo();
+    try {
+      seedChangeDir(dir, {
+        'specs/changes/chg-demo/status.json': '{}\n',
+      });
+      const churned = `${'y\n'.repeat(40)}`;
+      commitOnBranch(dir, {
+        'a.txt': 'line1\nline2\n',
+        'specs/changes/chg-demo/status.json': churned,
+      });
+      const verdict = classify(dir);
+      assert.equal(verdict.track, 'lite');
+      assert.equal(verdict.files, 1, 'committed status.json must not count either');
+      assert.equal(verdict.total, 1);
+      assert.deepEqual(verdict.force_full, []);
+    } finally {
+      cleanup(dir);
+    }
+  });
+});

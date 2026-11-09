@@ -21,6 +21,13 @@ Thresholds (initial values, see evalid #97 for the calibration):
   flips the verdict to ``full`` -- the spec ritual exists precisely to catch
   drift there, so a small diff touching spec/workflow definitions must not
   skip it. An empty diff classifies ``lite``.
+* Workflow-generated artifacts under ``specs/changes/<id>/`` do not count
+  (slice 4, evalid #103): the workflow itself rewrites ``status.json``
+  (+268 lines in the M4 demo) and writes proof artifacts (``tdd/``,
+  ``cr/``, ``verify_proof.json``, ``spec_delta_review.*``) during a run,
+  so a resume re-measuring the worktree would otherwise flip an auto-lite
+  change to full on its own state. Human-authored spec files
+  (``proposal.md`` / ``plan.md`` / ``tasks.md``) still force full.
 
 CLI (always prints one JSON object; exit 0, exit 2 on git/usage errors)::
 
@@ -52,6 +59,36 @@ DEFAULT_MAX_FILES = 10
 DEFAULT_MAX_LINES = 300
 FORCE_FULL_PREFIXES = ("specs/", "workflows/")
 VERSION = 1
+
+# Files the workflow itself writes under specs/changes/<id>/ -- machine
+# state and proof artifacts, not spec prose (slice 4, evalid #103).
+GENERATED_CHANGE_FILES = (
+    "status.json",
+    "verify_proof.json",
+    "spec_delta_review.json",
+    "spec_delta_review.md",
+)
+GENERATED_CHANGE_DIRS = ("tdd/", "cr/")
+
+
+def _is_generated_change_artifact(path):
+    """True when ``path`` is workflow-generated state under a change dir.
+
+    ``specs/changes/<id>/status.json`` is rewritten by the workflow on
+    every run (stage transitions, integrity block); ``tdd/`` / ``cr/``
+    hold sealed proofs and review output, ``verify_proof.json`` and
+    ``spec_delta_review.*`` likewise. None of these is a human spec edit,
+    so none of them may force the full track or inflate the measured
+    diff. Anything else under ``specs/changes/<id>/`` -- in particular
+    ``proposal.md`` / ``plan.md`` / ``tasks.md`` -- still counts.
+    """
+    parts = path.split("/")
+    if len(parts) < 4 or parts[0] != "specs" or parts[1] != "changes":
+        return False
+    rest = parts[3:]
+    if len(rest) == 1 and rest[0] in GENERATED_CHANGE_FILES:
+        return True
+    return bool(rest) and (rest[0] + "/") in GENERATED_CHANGE_DIRS
 
 
 def _git(repo, *argv):
@@ -172,6 +209,15 @@ def classify_repo(repo, base="main", max_files=DEFAULT_MAX_FILES,
         stats = _numstat_worktree(repo, base_sha)
     else:
         stats = _numstat(repo, base_sha)
+    # Workflow-generated artifacts under specs/changes/<id>/ are the
+    # workflow's own state, not the change under review (slice 4): drop
+    # them before the verdict so a resume cannot flip to full on its own
+    # status.json rewrite, and so their lines cannot inflate the budget.
+    stats = {
+        path: counts
+        for path, counts in stats.items()
+        if not _is_generated_change_artifact(path)
+    }
     files = sorted(stats)
     added = sum(a for a, _ in stats.values())
     removed = sum(r for _, r in stats.values())
