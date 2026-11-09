@@ -5478,6 +5478,21 @@ async function handleWorkflow(sub, args) {
         }
       }
       ensureChangeId(changeId, 'workflow run', projectRoot);
+      // M4 slice 3 (evalid #101): auto-select the lite track. With no
+      // explicit flag the classifier decides (small diff -> lite, big diff
+      // -> full, classifier failure -> full); --lite / --full always win.
+      // The decision is attached to the workflow input so the executor
+      // records it in the workflow_started / workflow_completed events.
+      const { decideLiteTrack, resolveLiteTrackAuto } = await import('../src/core/lite-track-auto.js');
+      const autoDecision = (parsedArgs.lite === true || parsedArgs.full === true)
+        ? null
+        : resolveLiteTrackAuto({ projectRoot });
+      const { lite: effectiveLite, decision: liteDecision } = decideLiteTrack({
+        lite: parsedArgs.lite, full: parsedArgs.full, autoDecision,
+      });
+      if (effectiveLite) input.lite = true;
+      input.lite_track_decision = liteDecision;
+      console.log(`Lite fast track: ${liteDecision.source} → ${liteDecision.track} (${liteDecision.reason})`);
       const { load, dryRun } = await import('../src/core/workflow-loader.js');
       if (isDryRun) {
         dryRun(yamlPath);
@@ -6694,9 +6709,18 @@ Commands:
 Options:
   --lite                  M4 lite fast track: skip spec-ritual steps
                           (proposal-consistency-check phase, J4a/J4b atoms)
-                          and keep seal + replay only. Run the classifier
-                          first (python3 xflow/atoms/lite_track.py --repo .)
-                          and add --lite only when it says lite.
+                          and keep seal + replay only. Always wins over the
+                          auto verdict (see below).
+  --full                  M4 lite fast track: force the full track, skipping
+                          the auto verdict. Wins over --lite when both are
+                          given.
+                          With neither --lite nor --full, the run classifies
+                          the working-tree diff first
+                          (python3 xflow/atoms/lite_track.py --repo .)
+                          and auto-selects lite for a small diff, full for a
+                          big one; a classifier failure falls back to full.
+                          The decision is printed and recorded in the run's
+                          workflow events as lite_track_decision.
   help, -h, --help Show this help message
 `);
 }

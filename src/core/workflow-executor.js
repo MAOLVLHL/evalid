@@ -75,9 +75,13 @@ export class WorkflowExecutor {
 
   // ─── Main execution loop ─────────────────────────────────────────────────
 
-  // M4 lite fast track: explicit `--lite` input only (the classifier in
-  // xflow/atoms/lite_track.py is the decision procedure; this flag is the
-  // enforcement switch). No silent auto-switching.
+  // M4 lite fast track: `input.lite === true` engages it. Slice 1 set this
+  // only from the explicit `--lite` flag; slice 3 (evalid #101) lets the
+  // CLI resolve it first -- `decideLiteTrack` in lite-track-auto.js runs
+  // the classifier when no explicit flag is given and sets `input.lite`
+  // when the verdict is lite, so the executor itself never decides. The
+  // decision itself arrives as `input.lite_track_decision` and is recorded
+  // in the workflow_started / workflow_completed events.
   isLiteFastTrack() {
     return this.input?.lite === true;
   }
@@ -137,6 +141,10 @@ export class WorkflowExecutor {
       workflow: this.workflow.name,
       track: this.workflow.track,
       lite_fast_track: this.isLiteFastTrack(),
+      // M4 slice 3: how the track was chosen (auto / explicit-lite /
+      // explicit-full / auto-fallback-full); null when the run was started
+      // without the CLI decision step (e.g. direct executor use).
+      lite_track_decision: this.input?.lite_track_decision ?? null,
       workflow_integrity: this.workflowManifest,
       max_parallel_agents: this.maxParallelAgents,
       parallel_policy: this.concurrencyPolicy.mode,
@@ -351,6 +359,7 @@ export class WorkflowExecutor {
       workflow: this.workflow.name,
       track: this.workflow.track,
       lite_fast_track: this.isLiteFastTrack(),
+      lite_track_decision: this.input?.lite_track_decision ?? null,
       workflow_integrity: this.workflowManifest,
       change_id: this.changeId || null,
       mission_id: this.runtime.missionId || null,
