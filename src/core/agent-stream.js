@@ -1,0 +1,433 @@
+/**
+ * agent-stream — turns coding-agent CLI output into execution-log events.
+ *
+ * `agent_invoke` spawns codex/claude with line-delimited JSON (--json / --output-format
+ * stream-json). That output used to be buffered into a string and thrown away, which left a
+ * 5-to-30-minute black box in the middle of every heavy phase. Here the same bytes are split
+ * into lines, normalized to a small event vocabulary, and appended to the hash-chained
+ * execution log, which both the CLI and `xflow serve` already read.
+ *
+ * Vocabulary (deliberately tiny, and aligned with bench/swebench/harness/arms.py):
+ *   agent_start | tool_start | tool_end | message_end | agent_end | raw
+ *
+ * Unknown line shapes degrade to `raw` instead of throwing: a CLI version bump must never be
+ * able to break a workflow run.
+ */
+import { createHash } from 'node:crypto';
+import { StringDecoder } from 'node:string_decoder';
+import { appendExecutionLog } from './execution-log.js';
+
+export const AGENT_EVENT_KINDS = Object.freeze(['agent_start', 'tool_start', 'tool_end', 'message_end', 'agent_end', 'raw']);
+export const DEFAULT_MAX_LINE_BYTES = 1 << 20;
+export const DEFAULT_FLUSH_INTERVAL_MS = 200;
+const MAX_TEXT_CHARS = 2048;
+const MAX_PREVIEW_CHARS = 160;
+const MAX_QUEUE_LENGTH = 500;
+
+/**
+ * Split a byte stream into complete lines.
+ *
+ * `push` accepts Buffers or strings and never emits a partial line; `flush` emits the trailing
+ * line before the process goes away. A line larger than `maxLineBytes` is replaced by a single
+ * truncation marker so a runaway output cannot grow memory without bound.
+ */
+export function createLineSplitter(onLine, options = {}) {
+  const maxLineBytes = Math.max(1024, Number(options.maxLineBytes) || DEFAULT_MAX_LINE_BYTES);
+  const decoder = new StringDecoder('utf8');
+  let buffer = '';
+  let dropping = false;
+
+  const emit = (line) => {
+    const value = line.endsWith('\r') ? line.slice(0, -1) : line;
+    try {
+      onLine(value);
+    } catch {
+      // A consumer bug must never break the agent pipe.
+    }
+  };
+
+  const drain = () => {
+    let newlineAt = buffer.indexOf('\n');
+    while (newlineAt !== -1) {
+      const line = buffer.slice(0, newlineAt);
+      buffer = buffer.slice(newlineAt + 1);
+      if (dropping) {
+        dropping = false;
+      } else if (line.length > maxLineBytes) {
+        emit(JSON.stringify({ type: 'xflow.line_truncated', bytes: line.length }));
+      } else {
+        emit(line);
+      }
+      newlineAt = buffer.indexOf('\n');
+    }
+  };
+
+  return {
+    push(chunk) {
+      if (chunk === undefined || chunk === null) return;
+      buffer += typeof chunk === 'string' ? chunk : decoder.write(chunk);
+      drain();
+      if (!dropping && buffer.length > maxLineBytes) {
+        emit(JSON.stringify({ type: 'xflow.line_truncated', bytes: buffer.length }));
+        buffer = '';
+        dropping = true;
+      }
+    },
+    flush() {
+      const tail = decoder.end();
+      if (tail) buffer += tail;
+      drain();
+      if (dropping) {
+        buffer = '';
+        dropping = false;
+      }
+      if (buffer.length) {
+        const line = buffer;
+        buffer = '';
+        emit(line);
+      }
+    },
+    get pending() {
+      return buffer.length;
+    },
+  };
+}
+
+/** First normalized event for a line, or null. Kept for one-line CLIs and simple callers. */
+export function normalizeAgentEvent(raw, options = {}) {
+  const events = normalizeAgentEvents(raw, options);
+  return events.length ? events[0] : null;
+}
+
+/** Every normalized event carried by one CLI line (a Claude message can hold text and tool calls). */
+export function normalizeAgentEvents(raw, options = {}) {
+  const adapter = options.adapter || 'unknown';
+  const seq = Number(options.seq) || 0;
+  const text = String(raw ?? '').trim();
+  if (!text) return [];
+
+  let payload;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    return [{ seq, event: 'raw', reason: 'invalid_json', text: truncateText(text) }];
+  }
+  if (!payload || typeof payload !== 'object') {
+    return [{ seq, event: 'raw', reason: 'non_object_payload', text: truncateText(text) }];
+  }
+  if (payload.type === 'xflow.line_truncated') {
+    return [{ seq, event: 'raw', reason: 'line_truncated', truncated: true, text: String(payload.bytes || 0) }];
+  }
+
+  const family = detectFamily(payload, adapter);
+  const mapped = (family === 'claude' ? mapClaudePayload : mapCodexPayload)(payload)
+    .filter((event) => event && event.event);
+  if (!mapped.length) return [];
+  return mapped.map((event) => ({ seq, ...event }));
+}
+
+function detectFamily(payload, adapter) {
+  if (adapter === 'claude_cli') return 'claude';
+  if (adapter === 'codex_cli') return 'codex';
+  const type = String(payload.type || '');
+  if (['system', 'assistant', 'result', 'user', 'stream_event'].includes(type)) return 'claude';
+  return 'codex';
+}
+
+function mapCodexPayload(payload) {
+  const type = String(payload.type || '');
+  switch (type) {
+    case 'thread.started':
+      return [{ event: 'agent_start', event_type: type }];
+    case 'item.started':
+      return mapCodexItem(payload.item, 'start');
+    case 'item.completed':
+      return mapCodexItem(payload.item, 'end');
+    case 'turn.completed':
+      return [{ event: 'agent_end', event_type: type, usage: readCodexUsage(payload.usage) }];
+    case 'turn.failed':
+    case 'error':
+      return [{ event: 'raw', event_type: type, level: 'error', text: truncateText(errorText(payload)) }];
+    default:
+      return [];
+  }
+}
+
+function mapCodexItem(item, phase) {
+  if (!item || typeof item !== 'object') return [];
+  const itemType = String(item.type || '');
+  if (itemType === 'agent_message') {
+    return phase === 'end' ? [{ event: 'message_end', event_type: itemType, text: truncateText(item.text) }] : [];
+  }
+  if (itemType === 'reasoning') {
+    // Model reasoning is not progress a human can act on, and it is the largest payload.
+    return [];
+  }
+  if (itemType === 'command_execution') {
+    if (phase === 'start') {
+      const command = Array.isArray(item.command) ? item.command.join(' ') : String(item.command || '');
+      return [toolStart('shell', command, itemType)];
+    }
+    return [toolEnd('shell', itemType, item.exit_code, item.status)];
+  }
+  if (itemType === 'mcp_tool_call') {
+    const tool = String(item.name || item.tool || 'mcp_tool');
+    if (phase === 'start') return [toolStart(tool, stringifyArgs(item.arguments ?? item.input ?? item.args), itemType)];
+    return [toolEnd(tool, itemType, item.exit_code, item.status)];
+  }
+  if (itemType === 'file_change') {
+    const paths = Array.isArray(item.changes)
+      ? item.changes.map((change) => change && change.path).filter(Boolean).join(', ')
+      : String(item.path || '');
+    if (phase === 'start') return [toolStart('file_change', paths, itemType)];
+    return [toolEnd('file_change', itemType, item.exit_code, item.status)];
+  }
+  if (itemType === 'web_search') {
+    return phase === 'start'
+      ? [toolStart('web_search', String(item.query || ''), itemType)]
+      : [toolEnd('web_search', itemType, null, item.status)];
+  }
+  return [];
+}
+
+function mapClaudePayload(payload) {
+  const type = String(payload.type || '');
+  if (type === 'system') {
+    return payload.subtype === 'init' ? [{ event: 'agent_start', event_type: 'system:init' }] : [];
+  }
+  if (type === 'assistant') {
+    const content = Array.isArray(payload.message?.content) ? payload.message.content : [];
+    const events = [];
+    let pendingText = [];
+    const flushText = () => {
+      if (!pendingText.length) return;
+      events.push({ event: 'message_end', event_type: 'assistant_text', text: truncateText(pendingText.join('\n')) });
+      pendingText = [];
+    };
+    for (const block of content) {
+      if (!block || typeof block !== 'object') continue;
+      if (block.type === 'text' && typeof block.text === 'string') {
+        pendingText.push(block.text);
+      } else if (block.type === 'tool_use') {
+        // Preserve the order the model produced: text first, then the tool call it announced.
+        flushText();
+        events.push(toolStart(String(block.name || 'tool'), stringifyArgs(block.input), 'tool_use'));
+      }
+    }
+    flushText();
+    return events;
+  }
+  if (type === 'user') {
+    // Tool results echo output the tool_start/tool_end pair already accounted for.
+    return [];
+  }
+  if (type === 'result') {
+    return [{
+      event: 'agent_end',
+      event_type: 'result:' + String(payload.subtype || 'success'),
+      usage: readClaudeUsage(payload.usage),
+      cost_usd: finiteOrNull(payload.total_cost_usd),
+      duration_ms: finiteOrNull(payload.duration_ms),
+    }];
+  }
+  if (type === 'stream_event') {
+    // Token-level deltas are out of scope; the finished message arrives as an assistant line.
+    return [];
+  }
+  if (type === 'error') {
+    return [{ event: 'raw', event_type: 'error', level: 'error', text: truncateText(errorText(payload)) }];
+  }
+  return [];
+}
+
+function toolStart(tool, argsText, eventType) {
+  const text = typeof argsText === 'string' ? argsText : '';
+  return {
+    event: 'tool_start',
+    event_type: eventType,
+    tool,
+    args_preview: text ? truncateText(text, MAX_PREVIEW_CHARS) : null,
+    args_digest: text ? digest(text) : null,
+  };
+}
+
+function toolEnd(tool, eventType, exitCode, status) {
+  return {
+    event: 'tool_end',
+    event_type: eventType,
+    tool,
+    exit_code: finiteOrNull(exitCode),
+    status: status ? String(status) : null,
+  };
+}
+
+function readCodexUsage(usage) {
+  if (!usage || typeof usage !== 'object') return null;
+  return compactUsage({
+    input: usage.input_tokens,
+    output: usage.output_tokens,
+    cache_read: usage.cached_input_tokens,
+    cache_write: usage.cache_creation_input_tokens,
+  });
+}
+
+function readClaudeUsage(usage) {
+  if (!usage || typeof usage !== 'object') return null;
+  return compactUsage({
+    input: usage.input_tokens,
+    output: usage.output_tokens,
+    cache_read: usage.cache_read_input_tokens,
+    cache_write: usage.cache_creation_input_tokens,
+  });
+}
+
+function compactUsage(raw) {
+  const usage = {};
+  for (const [key, value] of Object.entries(raw)) {
+    const number = Number(value);
+    if (Number.isFinite(number) && number >= 0) usage[key] = number;
+  }
+  return Object.keys(usage).length ? usage : null;
+}
+
+/**
+ * Collect normalized events from one agent process and append them to the execution log.
+ *
+ * Writes are batched on a short timer so a chatty CLI produces kilobytes, not megabytes, and a
+ * write failure is counted in `stats.write_errors` rather than surfaced to the agent run.
+ */
+export function createAgentEventSink(options = {}) {
+  const projectRoot = options.projectRoot || process.cwd();
+  const changeId = options.changeId || null;
+  const missionId = options.missionId || null;
+  const phase = typeof options.phase === 'string' ? options.phase : (options.phase?.id || null);
+  const atom = options.atom || null;
+  const adapter = options.adapter || 'unknown';
+  const flushIntervalMs = Math.max(0, Number(options.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS));
+  const maxQueue = Math.max(1, Number(options.maxQueue) || MAX_QUEUE_LENGTH);
+
+  const queue = [];
+  const stats = { lines: 0, events: 0, written: 0, dropped: 0, truncated: 0, write_errors: 0 };
+  let seq = 0;
+  let timer = null;
+  let writing = Promise.resolve();
+  let closed = false;
+
+  const splitter = createLineSplitter((line) => {
+    if (closed || !line) return;
+    stats.lines += 1;
+    for (const normalized of normalizeAgentEvents(line, { adapter, seq })) {
+      seq += 1;
+      stats.events += 1;
+      if (normalized.truncated) stats.truncated += 1;
+      queue.push(buildRecord(normalized, seq));
+      if (queue.length > maxQueue) {
+        queue.shift();
+        stats.dropped += 1;
+      }
+    }
+    schedule();
+  });
+
+  function buildRecord(event, eventSeq) {
+    const record = {
+      kind: 'agent_event',
+      event: event.event,
+      phase,
+      atom,
+      adapter,
+      seq: eventSeq,
+    };
+    for (const key of [
+      'event_type', 'tool', 'text', 'args_preview', 'args_digest', 'usage',
+      'exit_code', 'status', 'level', 'cost_usd', 'duration_ms', 'reason', 'truncated',
+    ]) {
+      const value = event[key];
+      if (value === undefined || value === null) continue;
+      record[key] = value;
+    }
+    if (changeId) record.change_id = changeId;
+    if (missionId) record.mission_id = missionId;
+    return record;
+  }
+
+  function schedule() {
+    if (timer || !queue.length || closed) return;
+    timer = setTimeout(() => {
+      timer = null;
+      flush().catch(() => {});
+    }, flushIntervalMs);
+    if (typeof timer.unref === 'function') timer.unref();
+  }
+
+  function flush() {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    const batch = queue.splice(0, queue.length);
+    if (!batch.length) return writing;
+    writing = writing.then(async () => {
+      for (const record of batch) {
+        try {
+          await appendExecutionLog(projectRoot, record);
+          stats.written += 1;
+        } catch {
+          stats.write_errors += 1;
+        }
+      }
+    });
+    return writing;
+  }
+
+  return {
+    push(chunk) {
+      if (closed) return;
+      splitter.push(chunk);
+    },
+    /** Write the trailing partial line, then every queued event. Safe to call twice. */
+    async close() {
+      splitter.flush();
+      closed = true;
+      await flush();
+      return stats;
+    },
+    flush,
+    stats,
+    get pending() {
+      return queue.length;
+    },
+    get closed() {
+      return closed;
+    },
+  };
+}
+
+function digest(value) {
+  return createHash('sha256').update(value).digest('hex').slice(0, 16);
+}
+
+function errorText(payload) {
+  return String(payload.message || payload.error?.message || payload.error || payload.type || 'agent error');
+}
+
+function finiteOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function stringifyArgs(value) {
+  if (value === undefined || value === null) return '';
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return '';
+  }
+}
+
+function truncateText(value, maxChars = MAX_TEXT_CHARS) {
+  const text = typeof value === 'string' ? value : String(value ?? '');
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}…`;
+}

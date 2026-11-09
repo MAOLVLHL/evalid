@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","session_id":"sess_1","tools":["Bash","Read","Write"]}
+{"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text":"Reading the phase artifact template."},{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"prompts/phase-artifact.md"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"# Phase artifact"}]}}
+{"type":"assistant","message":{"id":"msg_2","content":[{"type":"tool_use","id":"toolu_2","name":"Write","input":{"file_path":"specs/changes/chg-1/artifact.json"}}]}}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":184000,"total_cost_usd":0.0412,"usage":{"input_tokens":900,"output_tokens":210,"cache_read_input_tokens":400}}

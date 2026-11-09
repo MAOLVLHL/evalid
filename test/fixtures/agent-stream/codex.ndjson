@@ -1,0 +1,8 @@
+{"type":"thread.started","thread_id":"thread_8f2c"}
+{"type":"turn.started","turn_id":"turn_1"}
+{"type":"item.started","item":{"id":"item_0","type":"reasoning","text":"Planning the change"}}
+{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"Planning the change"}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"npm test"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"npm test","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"Tests pass; writing the artifact now."}}
+{"type":"turn.completed","usage":{"input_tokens":1200,"output_tokens":340,"cached_input_tokens":800}}
