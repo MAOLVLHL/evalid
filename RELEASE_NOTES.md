@@ -1,5 +1,19 @@
 # Release Notes
 
+## 0.5.20 - M4 lite fast track, slices 3–4 (milestone M4 not yet accepted)
+
+Patch release. Two merged PRs since 0.5.19, both verified end to end in CI and locally.
+
+**M4 slice 3: workflow run auto-selects lite (#102).** `xflow workflow run` with no explicit flag runs the classifier first and picks the track itself — small diff → lite, big diff → full, explicit `--lite` / `--full` always wins, classifier failure falls back to full and records it. The decision is written into the workflow events as `lite_track_decision`, next to `lite_fast_track`. Test evidence: 19 new tests in `test/lite-track-auto.test.js` RED→GREEN; PR CI runs verify 42702996913 and ledger 42702997046 both pass; merged main CI run 42703634292 success.
+
+**M4 slice 4: classifier ignores workflow-written change artifacts (#104).** The auto end-to-end acceptance demo on main HEAD caught a real bug: run 1 auto-decided lite and sealed the red proof, but the resume flipped to full because run 1 had rewritten the tracked `specs/changes/<id>/status.json` itself (+268/−2 lines) and the force-full rule fired on the `specs/` path. `classify_repo` now excludes workflow-generated artifacts under `specs/changes/<id>/` (`status.json`, `verify_proof.json`, `spec_delta_review.*`, `tdd/`, `cr/`) from the measured stats; human spec files still force full. Test evidence: 4 new classifier unit tests RED→GREEN (4/4 fail without the fix); new end-to-end regression test `test/lite-track-auto-acceptance.test.js` (real small fix, no flag, resume stays lite; 400-line control stays auto-full) fails before the fix, passes after; full `npm run verify` exit 0 — 61 test files, 560 tests, 559 pass, 0 fail; PR CI runs verify 42722307306 and ledger 42722307186 both pass; merged main CI run 42722893282 success.
+
+Wall clock, stated plainly as preliminary (docs/evidence/m4-slice4-auto-resume.md, n=1 per track, same auto demo flow, Linux VM / node v24.22.1 / python 3.12.3): auto demo lite 4,995 ms vs full 6,363 ms (ratio 0.785) isolated, lite 8,239 ms vs full 7,124 ms (ratio 1.157) inside `npm run verify`; slice-2 demo re-measured 1.291 in the same suite run. Same demo, same machine, ratios 0.785–1.291 — n=1 demo timings are dominated by startup and machine load, not by the spec ritual. The formal ≤1.3× verdict for issue #5 P1-2 waits for the bench full-matrix numbers; P1-2 stays unticked, and this release makes no ≤1.3× claim.
+
+**Milestone M4 "lite fast track" — not yet accepted.** Slices 1–4 are merged checkpoints; the auto end-to-end acceptance is now demonstrated (real small change through auto-lite across the red→green resume, real large change judged auto-full, seal + clean replay), but the wall-clock verdict still awaits bench numbers.
+
+Acceptance debt, stated plainly: the bench-number acceptance for P1-2, P1-3, P2-1 and P2-3 — the wall-clock/token/resolved lines from issue #5 — still awaits the MiniMax full-matrix batch (15 instances × 4 arms × reps 3), at 82/135 with the 12th relaunch in flight. No bench numbers are claimed in this release.
+
 ## 0.5.19 - M4 lite fast track, slices 1–2 (milestone M4 not yet accepted)
 
 Patch release. Two merged PRs since 0.5.18, both verified end to end in CI and locally.
