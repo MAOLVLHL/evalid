@@ -3,6 +3,15 @@
 All notable changes to this project are documented here. Detailed notes live in
 [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## [0.5.21] - 2026-11-10
+
+### Added
+- **Agent progress streaming through the execution log and SSE, external contribution (#95)**: `xflow workflow run` now streams live agent progress — `codex exec --json` and `claude --output-format stream-json --verbose` feed the execution log as the event bus, `entry_hash` is the resume token, and `xflow serve` pushes the stream over SSE. Appends no longer re-read the whole file (tail cache + 16 KB tail read, expanding to a full line when the last entry exceeds the window); a >16 KB last entry no longer breaks the hash chain on a cold cache. Test evidence: 32/32 across the four affected test files (`test/agent-stream.test.js`, `test/log-tail.test.js`, `test/execution-log.test.js`, `test/server.test.js`) locally; demo `node scripts/demo-agent-stream.mjs` 5 pushed / 5 written / 5 received over SSE, latency 16–419 ms; PR CI runs verify 42761169188 and ledger 42761169204 both pass on the final HEAD; merged main CI run 42762022933 success.
+
+Milestone M4 "lite fast track" — **not yet accepted**: this release ships no M4 slice; slices 1–4 remain merged checkpoints and the wall-clock verdict still awaits bench numbers. This release makes no M4 acceptance claim.
+
+Acceptance debt, stated plainly: the bench-number acceptance for P1-2 / P1-3 / P2-1 / P2-3 still awaits the MiniMax full-matrix batch (15 instances × 4 arms × reps 3), which is at 98/135 with the 15th relaunch in flight. No bench numbers are claimed in this release.
+
 ## [0.5.20] - 2026-11-10
 
 ### Added
