@@ -3,6 +3,18 @@
 All notable changes to this project are documented here. Detailed notes live in
 [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## [0.5.22] - 2026-11-11
+
+### Added
+- **Milestone M4 "lite fast track" — accepted (issue #97, comment 6779685027)**: the lite fast track is now the accepted milestone. ① Classifier: `lite_track.py` classifies a diff `lite` / `full` (thresholds 10 files / 300 lines, `specs/` or `workflows/` touches force full, empty diff is lite); `xflow workflow run` gains `--lite` / `--full` flags and auto-selects when no flag is given. ② Lite path = seal + replay only: `proposal-consistency-check` and atoms `J4a` / `J4b` are skipped (`phase_skipped` / `atom_skipped`, reason `lite_track`), the `verify-consistency` gate passes with verdict `lite_skipped`, and `workflow_completed` records `lite_fast_track: true`; kept in lite mode are the TDD run + proof seal + I6d gate, the full test run (J1), code review (J6) and `xflow audit` replay. ③ Wall clock: n=3对照 0.653 / 1.115 / 0.822, median 0.822 ≤ 1.3×. ④(a) Real small change through `--lite` end to end: the merged fix #110 (2 files, 160 lines) ran through the real executor with the real `workflows/yolo.yaml` — red proof sealed (`passed: false`, `failure_kind: assertion`), green proof sealed (`passed: true`, binding `a6f3c052…`), I6b `valid`, I6d `pass`, I6c `passed`, J1/J6 passed, `verify_proof.json` `all_passed: true`. ④(b) Real large change judged full: merged PR #34 (6 files, 318+/12−, 330 lines) classifies `full` (330 > 300 line budget), so its spec ritual would really run. Test evidence: full `npm run verify` exit 0 — 63 test files, 0 fail; PR #110 CI runs verify 42884719774 and ledger 42884719997 both pass; merged main CI run 42885424667 success.
+- **Classifier counts untracked files in --uncommitted mode (#110, closes #109)**: `lite_track.py --uncommitted` used to count only tracked changes, so a fix consisting of brand-new files looked like an empty diff and was misjudged lite. It now counts untracked files (`git ls-files --others`) in the measured stats. Test evidence: 4 new tests in `test/lite-track.test.js` (the #109 describe block: 22 tests in the file, 18 pass / 4 fail without the fix, 22/22 pass with it); PR CI runs verify 42884719774 and ledger 42884719997 both pass; merged main CI run 42885424667 success.
+
+Honest note, stated plainly: the literal `xflow proof --track yolo` still exits 1 — it requires all 13 workflow phases to have `phase_completed`, and the acceptance change completed 4/13; the missing 9 include `openissue` / `set-in-progress` / `execute` / `archive`, which need real GitHub actions and cannot be completed in a scratch run. The acceptance verdict (issue #97, comment 6779685027) accepts the verification spine (seal + replay + J1 + J6) as the proof for ④(a); the track-level 13-phase completeness check is not a veto item for this milestone. This is recorded as-is, not written up as green.
+
+Follow-up filed, not fixed here: the I6b replay tree never contains `node_modules` (issue #111, open) — any test that imports an npm dependency reports `no_test_evidence` on replay. The acceptance run worked around it by prefixing the TDD command with `npm ci`; no tool code was changed for this release.
+
+Acceptance debt, stated plainly: the MiniMax full-matrix bench batch (15 instances × 4 arms × reps 3) reached 135/135 complete on 2026-11-10, but the issue #5 acceptance ledger tick-off (P1-2 / P1-3 / P2-1 / P2-3) is still pending — no bench numbers are claimed in this release.
+
 ## [0.5.21] - 2026-11-10
 
 ### Added

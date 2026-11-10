@@ -1,5 +1,19 @@
 # Release Notes
 
+## 0.5.22 - Milestone M4 "lite fast track" accepted
+
+Patch release. One merged PR since 0.5.21, verified end to end in CI and locally — and the milestone it completes is now accepted.
+
+**Milestone M4 "lite fast track" — accepted (issue #97, comment 6779685027).** Small diffs now skip the spec ritual and run seal + replay only: the classifier (`lite_track.py`, 10 files / 300 lines) decides lite vs full, `xflow workflow run` takes `--lite` / `--full` or auto-selects, and in a lite run `proposal-consistency-check` and atoms `J4a` / `J4b` are skipped while the TDD proof seal, I6d gate, full test run (J1), code review (J6) and audit replay all still run. Wall clock: n=3对照 0.653 / 1.115 / 0.822, median 0.822 ≤ 1.3×. Acceptance evidence, all measured on the real repo: the merged fix #110 (2 files, 160 lines) ran through the real executor with the real `workflows/yolo.yaml` — red proof sealed, green proof sealed with binding hash, I6b `valid`, I6d `pass`, J1/J6 passed, `verify_proof.json` `all_passed: true`; and the merged large change PR #34 (330 lines) was measured by the classifier as `full`, so its spec ritual would really run. Test evidence: full `npm run verify` exit 0 — 63 test files, 0 fail; PR #110 CI runs verify 42884719774 and ledger 42884719997 both pass; merged main CI run 42885424667 success.
+
+**Classifier counts untracked files in --uncommitted mode (#110, closes #109).** A fix made only of brand-new files used to look like an empty diff and was misjudged lite; untracked files are now counted. Test evidence: 4 new tests in `test/lite-track.test.js` (22 tests in the file: 18 pass / 4 fail without the fix, 22/22 pass with it).
+
+Honest note, stated plainly: the literal `xflow proof --track yolo` still exits 1 — it requires all 13 workflow phases to have `phase_completed`, and the acceptance change completed 4/13; the missing 9 include `openissue` / `set-in-progress` / `execute` / `archive`, which need real GitHub actions and cannot be completed in a scratch run. The acceptance verdict accepts the verification spine (seal + replay + J1 + J6) as the proof for ④(a); the track-level 13-phase completeness check is not a veto item for this milestone. This is recorded as-is, not written up as green.
+
+Follow-up filed, not fixed here: the I6b replay tree never contains `node_modules` (issue #111, open) — any test importing an npm dependency reports `no_test_evidence` on replay. The acceptance run worked around it by prefixing the TDD command with `npm ci`; no tool code was changed for this release.
+
+Acceptance debt, stated plainly: the MiniMax full-matrix bench batch (15 instances × 4 arms × reps 3) reached 135/135 complete on 2026-11-10, but the issue #5 acceptance ledger tick-off (P1-2, P1-3, P2-1, P2-3) is still pending — no bench numbers are claimed in this release.
+
 ## 0.5.21 - Agent progress streaming (external contribution #95)
 
 Patch release. One merged PR since 0.5.20, verified end to end in CI and locally.
