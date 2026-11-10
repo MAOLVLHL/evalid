@@ -300,6 +300,33 @@ export function extractClaims(text) {
   return claims;
 }
 
+/**
+ * Classify the single positional argument of `xflow audit <diff|PR>`
+ * (M2 slice 1, issue #114). Returns one of:
+ *   { kind: 'pr', number, repo }   — bare number, owner/repo#n, or a
+ *                                    github.com/.../pull/n URL (repo null
+ *                                    for a bare number: the PR lives in
+ *                                    the repo under audit)
+ *   { kind: 'diff', path }         — '-' (stdin), an existing file, or a
+ *                                    .patch/.diff path
+ *   { kind: 'unknown', raw }       — anything else (caller reports misuse)
+ * A bare number that is also an existing file is read as a PR number.
+ */
+export function parseAuditTarget(arg) {
+  const text = String(arg || '').trim();
+  if (!text) return { kind: 'unknown', raw: arg };
+  if (/^\d+$/.test(text)) return { kind: 'pr', number: text, repo: null, raw: arg };
+  let m = text.match(/^([\w.-]+\/[\w.-]+)#(\d+)$/);
+  if (m) return { kind: 'pr', number: m[2], repo: m[1], raw: arg };
+  m = text.match(/^https?:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)(?:\/.*)?$/);
+  if (m) return { kind: 'pr', number: m[2], repo: m[1], raw: arg };
+  if (text === '-') return { kind: 'diff', path: '-', raw: arg };
+  if (/\.(patch|diff)$/i.test(text) || existsSync(resolve(text))) {
+    return { kind: 'diff', path: text, raw: arg };
+  }
+  return { kind: 'unknown', raw: arg };
+}
+
 /** Parse a unified diff: touched files, touched test files, added evalid seals. */
 export function parseDiffFiles(diffText) {
   const files = [];

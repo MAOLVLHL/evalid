@@ -220,7 +220,10 @@ and pass/fail counts against the claim. If the diff carries an evalid
 proof seal, the seal is replayed through the existing i6b validator.
 
 ```bash
-xflow audit --pr 75                        # audit a GitHub PR (body = claims)
+xflow audit change.patch --base HEAD~1 --claims-file claims.txt
+xflow audit 75                        # audit a GitHub PR (body = claims)
+xflow audit surlymochan/evalid#75     # same, naming the repo
+xflow audit --pr 75                   # flag form of the same
 xflow audit --diff change.patch --base HEAD~1 --claims-file claims.txt
 xflow audit --base main --head feature/x --claims "npm test: exit 0"
 ```

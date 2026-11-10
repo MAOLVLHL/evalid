@@ -8,9 +8,11 @@ import { spawnSync } from 'node:child_process';
 import {
   extractClaims,
   isPythonTestFile,
+  parseAuditTarget,
   parseClaimCounts,
   parseDiffFiles,
   parseReplayCounts,
+  renderAuditReport,
   runAudit,
 } from '../src/core/audit.js';
 
@@ -158,6 +160,37 @@ describe('parseDiffFiles', () => {
     ]);
     assert.deepEqual(parsed.testFiles, ['test/github-action-verify-proof.test.js']);
     assert.deepEqual(parsed.seals, [{ changeId: 'pr-comment-ledger', phase: 'green', attempt: 0, path: 'specs/changes/pr-comment-ledger/tdd/green-0.json' }]);
+  });
+});
+
+describe('parseAuditTarget', () => {
+  test('classifies PR refs: bare number, owner/repo#n, PR URL', () => {
+    assert.deepEqual(parseAuditTarget('75'), { kind: 'pr', number: '75', repo: null, raw: '75' });
+    assert.deepEqual(parseAuditTarget('surlymochan/evalid#75'), { kind: 'pr', number: '75', repo: 'surlymochan/evalid', raw: 'surlymochan/evalid#75' });
+    assert.deepEqual(parseAuditTarget('https://github.com/surlymochan/evalid/pull/75'), { kind: 'pr', number: '75', repo: 'surlymochan/evalid', raw: 'https://github.com/surlymochan/evalid/pull/75' });
+    assert.deepEqual(parseAuditTarget('https://github.com/surlymochan/evalid/pull/75/files'), { kind: 'pr', number: '75', repo: 'surlymochan/evalid', raw: 'https://github.com/surlymochan/evalid/pull/75/files' });
+  });
+
+  test('classifies diff targets: .patch/.diff paths, existing files, stdin dash', () => {
+    assert.deepEqual(parseAuditTarget('change.patch'), { kind: 'diff', path: 'change.patch', raw: 'change.patch' });
+    assert.deepEqual(parseAuditTarget('/tmp/some.diff'), { kind: 'diff', path: '/tmp/some.diff', raw: '/tmp/some.diff' });
+    assert.deepEqual(parseAuditTarget('-'), { kind: 'diff', path: '-', raw: '-' });
+    // An existing file without a patch suffix is still a diff target.
+    const tmp = mkdtempSync(join(tmpdir(), 'evalid-audit-target-'));
+    try {
+      const file = join(tmp, 'notes.txt');
+      writeFileSync(file, 'x');
+      assert.deepEqual(parseAuditTarget(file), { kind: 'diff', path: file, raw: file });
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test('rejects anything else as unknown (a bare number wins over a file)', () => {
+    assert.equal(parseAuditTarget('hello').kind, 'unknown');
+    assert.equal(parseAuditTarget('owner/repo').kind, 'unknown');
+    assert.equal(parseAuditTarget('').kind, 'unknown');
+    assert.equal(parseAuditTarget('  ').kind, 'unknown');
   });
 });
 
@@ -347,6 +380,171 @@ describe('runAudit end-to-end on a fixture repo', () => {
       assert.equal(report.claims[0].replay.counts.passed, 2);
       assert.equal(report.claims[0].replay.counts.failed, 0);
       assert.equal(report.i6d.applicable, false);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('xflow audit CLI positional form (M2 slice 1, #114)', () => {
+  function runCli(cwd, args) {
+    return spawnSync(process.execPath, [join(repoRoot, 'bin', 'xflow.js'), 'audit', ...args], { cwd, encoding: 'utf8' });
+  }
+
+  function repoState(repo) {
+    const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim();
+    const status = spawnSync('git', ['status', '--porcelain'], { cwd: repo, encoding: 'utf8' }).stdout;
+    return { head, status };
+  }
+
+  test('positional diff file audits verified and leaves the target repo untouched', () => {
+    const { repo } = makeFixtureRepo();
+    const dir = mkdtempSync(join(tmpdir(), 'evalid-audit-cli-'));
+    try {
+      const base = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim();
+      const diff = makeDiff(repo, () => {
+        writeFileSync(join(repo, 'src.js'), 'export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\n');
+      });
+      const diffPath = join(dir, 'change.patch');
+      const claimsPath = join(dir, 'claims.txt');
+      writeFileSync(diffPath, diff);
+      writeFileSync(claimsPath, 'Tests: `node --test test/a.test.js` — 2 tests, all pass.');
+      const before = repoState(repo);
+      const result = runCli(repo, [diffPath, '--base', base, '--claims-file', claimsPath, '--json']);
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      const report = JSON.parse(result.stdout);
+      assert.equal(report.verdict, 'verified');
+      assert.equal(report.claims[0].replay.counts.passed, 2);
+      // Read-only: audit clones to a scratch dir; the target repo must be
+      // byte-identical afterwards (same HEAD, clean status).
+      assert.deepEqual(repoState(repo), before);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('human summary prints the verdict without --json', () => {
+    const { repo } = makeFixtureRepo();
+    const dir = mkdtempSync(join(tmpdir(), 'evalid-audit-cli-'));
+    try {
+      const base = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim();
+      const diff = makeDiff(repo, () => {
+        writeFileSync(join(repo, 'src.js'), 'export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\n');
+      });
+      const diffPath = join(dir, 'change.patch');
+      writeFileSync(diffPath, diff);
+      const result = runCli(repo, [diffPath, '--base', base, '--claims', 'Tests: `node --test test/a.test.js` — 2 tests, all pass.']);
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      assert.match(result.stdout, /xflow audit: verified/);
+      assert.match(result.stdout, /node --test test\/a\.test\.js/);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('tampered claim: inflated pass count fails with the exact breaking point', () => {
+    const { repo } = makeFixtureRepo();
+    const dir = mkdtempSync(join(tmpdir(), 'evalid-audit-cli-'));
+    try {
+      const base = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim();
+      const diff = makeDiff(repo, () => {
+        writeFileSync(join(repo, 'src.js'), 'export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\n');
+      });
+      const diffPath = join(dir, 'change.patch');
+      writeFileSync(diffPath, diff);
+      // The fixture has 2 tests; the claim says 3 passed. The replay
+      // really passes 2, so the verdict must be mismatch naming the count.
+      const result = runCli(repo, [diffPath, '--base', base, '--claims', 'Tests: `node --test test/a.test.js` — 3 tests, all pass.', '--json']);
+      assert.equal(result.status, 1, result.stdout + result.stderr);
+      const report = JSON.parse(result.stdout);
+      assert.equal(report.verdict, 'mismatch');
+      assert.equal(report.claims[0].match, false);
+      assert.match(report.claims[0].note, /passed count: claimed 3, replayed 2/);
+      assert.match(renderAuditReport(report), /mismatch/);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('an unrecognised positional target is misuse (exit 2), not a verdict', () => {
+    const { repo } = makeFixtureRepo();
+    try {
+      const result = runCli(repo, ['hello']);
+      assert.equal(result.status, 2);
+      assert.match(result.stderr, /cannot tell whether 'hello' is a diff file or a PR/);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test('positional target conflicts with --pr / --diff (exit 2)', () => {
+    const { repo } = makeFixtureRepo();
+    try {
+      const result = runCli(repo, ['change.patch', '--diff', 'other.patch']);
+      assert.equal(result.status, 2);
+      assert.match(result.stderr, /conflicts with --pr \/ --diff/);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('runAudit with a broken evalid seal (M2 slice 1, #114)', () => {
+  // Fixture repo carrying the i6b seal validator (copied from this repo).
+  // The diff under audit adds a seal file whose JSON is not a valid proof.
+  function makeSealFixtureRepo() {
+    const repo = mkdtempSync(join(tmpdir(), 'evalid-audit-seal-'));
+    const git = (args) => {
+      const result = spawnSync('git', args, { cwd: repo, encoding: 'utf8' });
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      return result;
+    };
+    git(['init', '-q']);
+    git(['config', 'user.email', 'audit-fixture@example.test']);
+    git(['config', 'user.name', 'audit-fixture']);
+    mkdirSync(join(repo, 'xflow', 'atoms'), { recursive: true });
+    copyFileSync(
+      join(repoRoot, 'xflow', 'atoms', 'i6b_tdd_proof_validate.py'),
+      join(repo, 'xflow', 'atoms', 'i6b_tdd_proof_validate.py'),
+    );
+    copyFileSync(
+      join(repoRoot, 'xflow', 'atoms', 'tdd_lib.py'),
+      join(repo, 'xflow', 'atoms', 'tdd_lib.py'),
+    );
+    writeFileSync(join(repo, 'README.md'), '# fixture\n');
+    git(['add', '.']);
+    git(['commit', '-qm', 'base']);
+    return { repo, git };
+  }
+
+  test('a seal file that is not a valid proof fails with the seal named', () => {
+    const { repo } = makeSealFixtureRepo();
+    try {
+      const base = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim();
+      const diff = makeDiff(repo, () => {
+        mkdirSync(join(repo, 'specs', 'changes', 'demo-change', 'tdd'), { recursive: true });
+        // Claims a green proof but carries none of the required fields
+        // (phase, attempt, command, exit_code, passed, recorded_at).
+        writeFileSync(join(repo, 'specs', 'changes', 'demo-change', 'tdd', 'green-0.json'), '{}\n');
+        // New file: intent-to-add so `git diff` in makeDiff includes it.
+        spawnSync('git', ['add', '-N', 'specs/changes/demo-change/tdd/green-0.json'], { cwd: repo, encoding: 'utf8' });
+      });
+      const report = runAudit({
+        repoDir: repo,
+        diffText: diff,
+        baseRef: base,
+        claimsText: 'Docs only, no test claims.',
+      });
+      assert.equal(report.verdict, 'mismatch', JSON.stringify(report, null, 2));
+      assert.equal(report.exitCode, 1);
+      assert.equal(report.seals.length, 1);
+      assert.equal(report.seals[0].ok, false);
+      assert.equal(report.seals[0].changeId, 'demo-change');
+      assert.equal(report.seals[0].phase, 'green');
+      assert.equal(report.seals[0].attempt, 0);
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }

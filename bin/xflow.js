@@ -41,7 +41,7 @@ import { spawnSync } from 'child_process';
 import { createHash } from 'crypto';
 import { tmpdir } from 'os';
 import { ackPendingGate } from '../src/core/pending-gates.js';
-import { runAudit, renderAuditReport } from '../src/core/audit.js';
+import { runAudit, renderAuditReport, parseAuditTarget } from '../src/core/audit.js';
 import { readEntriesFromOffset, readExecutionLogSize } from '../src/core/log-tail.js';
 import { exportDomRectsToFile, resolveCliPath } from '../src/agent_team/atoms/visual/dom-rect-export.js';
 import { capturePageEvidence } from '../src/agent_team/atoms/visual/page-evidence-capture.js';
@@ -5852,10 +5852,48 @@ async function handleAudit(args) {
   let claimsText = '';
   let baseRef = parsedArgs.base || null;
   let headRef = parsedArgs.head || null;
+  let prRepo = null; // owner/repo when the PR target names another repo
+
+  // Positional form (M2 slice 1, issue #114): `xflow audit <diff|PR>`.
+  // parseCliArgs drops bare words, so collect positionals here, skipping
+  // the values of flags that take one. A positional conflicts with the
+  // equivalent --pr / --diff flag.
+  const AUDIT_VALUE_FLAGS = new Set(['pr', 'diff', 'repo', 'base', 'head', 'claims', 'claims_file', 'out', 'timeout']);
+  const positionals = [];
+  for (let i = 0; i < args.length; i++) {
+    const part = args[i];
+    if (part.startsWith('--')) {
+      const key = part.slice(2).replace(/-/g, '_');
+      if (AUDIT_VALUE_FLAGS.has(key) && args[i + 1] !== undefined && !String(args[i + 1]).startsWith('--')) i += 1;
+      continue;
+    }
+    positionals.push(part);
+  }
+  if (positionals.length > 1) {
+    console.error(`xflow audit: expected one <diff|PR> target, got ${positionals.length}: ${positionals.join(' ')}`);
+    process.exit(2);
+  }
+  if (positionals.length === 1) {
+    if (parsedArgs.pr || parsedArgs.diff) {
+      console.error('xflow audit: positional <diff|PR> conflicts with --pr / --diff; use one form');
+      process.exit(2);
+    }
+    const target = parseAuditTarget(positionals[0]);
+    if (target.kind === 'pr') {
+      parsedArgs.pr = target.number;
+      prRepo = target.repo;
+    } else if (target.kind === 'diff') {
+      parsedArgs.diff = target.path;
+    } else {
+      console.error(`xflow audit: cannot tell whether '${positionals[0]}' is a diff file or a PR (expected a .patch/.diff path, a PR number, owner/repo#n, or a github.com/.../pull/n URL)`);
+      process.exit(2);
+    }
+  }
 
   if (parsedArgs.pr) {
     const prNumber = String(parsedArgs.pr);
-    const view = spawnSync('gh', ['pr', 'view', prNumber, '--json', 'body,baseRefOid,mergeCommit,headRefOid'], { cwd: repoDir, encoding: 'utf8' });
+    const repoArgs = prRepo ? ['--repo', prRepo] : [];
+    const view = spawnSync('gh', ['pr', 'view', prNumber, ...repoArgs, '--json', 'body,baseRefOid,mergeCommit,headRefOid'], { cwd: repoDir, encoding: 'utf8' });
     if (view.status !== 0) {
       console.error(`xflow audit: gh pr view ${prNumber} failed: ${(view.stderr || view.stdout || '').trim().slice(-300)}`);
       process.exit(2);
@@ -5870,7 +5908,7 @@ async function handleAudit(args) {
     claimsText = pr.body || '';
     baseRef = pr.baseRefOid || null;
     headRef = pr.mergeCommit?.oid || pr.headRefOid || null;
-    const diff = spawnSync('gh', ['pr', 'diff', prNumber], { cwd: repoDir, encoding: 'utf8' });
+    const diff = spawnSync('gh', ['pr', 'diff', prNumber, ...repoArgs], { cwd: repoDir, encoding: 'utf8' });
     if (diff.status !== 0) {
       console.error(`xflow audit: gh pr diff ${prNumber} failed: ${(diff.stderr || diff.stdout || '').trim().slice(-300)}`);
       process.exit(2);
@@ -5885,7 +5923,7 @@ async function handleAudit(args) {
     if (parsedArgs.claims) claimsText = String(parsedArgs.claims);
     if (parsedArgs.claims_file) claimsText = readFileSync(resolve(parsedArgs.claims_file), 'utf8');
     if (!headRef && !baseRef) {
-      console.error('Usage: xflow audit --pr <n> | --diff <patch> --base <ref> | --base <ref> --head <ref>');
+      console.error('Usage: xflow audit <diff|PR> [--base <ref>] [--claims-file <file>] [--json]\n       xflow audit --pr <n> | --diff <patch> --base <ref> | --base <ref> --head <ref>');
       process.exit(2);
     }
   }
@@ -6836,7 +6874,9 @@ Options:
 
 function printAuditHelp() {
   console.log(`
-Usage: xflow audit --pr <n> [--repo <path>] [--json] [--out <file>]
+Usage: xflow audit <diff|PR> [--base <ref>] [--claims-file <file>] [--json] [--out <file>]
+       xflow audit <n> | <owner/repo#n> | <github.com/.../pull/n URL>
+       xflow audit --pr <n> [--repo <path>] [--json] [--out <file>]
        xflow audit --diff <patch|-> --base <ref> [--claims-file <file>] [--json]
        xflow audit --base <ref> --head <ref> [--claims <text>] [--json]
 
