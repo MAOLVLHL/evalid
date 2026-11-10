@@ -117,6 +117,27 @@ describe('extractClaims', () => {
     assert.deepEqual(parseClaimCounts('6/6 pass'), { passed: 6, total: 6, failed: 0 });
     assert.deepEqual(extractClaims('Just a refactor, no tests mentioned.'), []);
   });
+
+  test('extracts python -m unittest claims: module, discover, and python3 -v forms', () => {
+    // Regression: swrm M2 attempt 1 (run 20261109-231900-3c6b2a) genuinely
+    // passed 9 unittest tests but audit reported no_claims — the runner
+    // list knew pytest only. Each form below must extract one claim.
+    const body = [
+      'Tests: `python -m unittest tests.test_foo` — 9 passed, 0 failed.',
+      'Also ran `python -m unittest discover` — 9 passed, 0 failed.',
+      'And `python3 -m unittest -v tests.test_bar` — 9 passed, 0 failed.',
+    ].join('\n');
+    const claims = extractClaims(body);
+    assert.equal(claims.length, 3, JSON.stringify(claims));
+    for (const claim of claims) {
+      assert.equal(claim.claimedPassed, 9);
+      assert.equal(claim.claimedFailed, 0);
+      assert.equal(claim.claimedExit, 0);
+    }
+    assert.equal(claims[0].command, 'python -m unittest tests.test_foo');
+    assert.equal(claims[1].command, 'python -m unittest discover');
+    assert.equal(claims[2].command, 'python3 -m unittest -v tests.test_bar');
+  });
 });
 
 describe('parseDiffFiles', () => {
@@ -152,6 +173,25 @@ describe('parseReplayCounts', () => {
     // not the suite total, so counts stay unparsed (exit code decides).
     assert.equal(parseReplayCounts('ℹ pass 3\nℹ fail 0\nℹ pass 1\nℹ fail 0\n'), null);
   });
+
+  test('reads python -m unittest summary lines (pytest parity)', () => {
+    assert.deepEqual(
+      parseReplayCounts('Ran 9 tests in 0.012s\n\nOK\n'),
+      { passed: 9, failed: 0, total: 9 },
+    );
+    assert.deepEqual(
+      parseReplayCounts('Ran 9 tests in 0.012s\n\nFAILED (failures=1, errors=1)\n'),
+      { passed: 7, failed: 2, total: 9 },
+    );
+    assert.deepEqual(
+      parseReplayCounts('Ran 9 tests in 0.012s\n\nFAILED (failures=2)\n'),
+      { passed: 7, failed: 2, total: 9 },
+    );
+    assert.deepEqual(
+      parseReplayCounts('Ran 9 tests in 0.012s\n\nOK (skipped=1)\n'),
+      { passed: 8, failed: 0, total: 9 },
+    );
+  });
 });
 
 function makeFixtureRepo() {
@@ -186,6 +226,41 @@ function makeDiff(repo, mutate) {
   const diff = git(['diff']).stdout;
   git(['checkout', '--', '.']);
   return diff;
+}
+
+// Python-only fixture: stdlib unittest, no pytest needed. The diff under
+// audit adds a function; the committed test file already covers it.
+function makePythonFixtureRepo() {
+  const repo = mkdtempSync(join(tmpdir(), 'evalid-audit-py-'));
+  const git = (args) => {
+    const result = spawnSync('git', args, { cwd: repo, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    return result;
+  };
+  git(['init', '-q']);
+  git(['config', 'user.email', 'audit-fixture@example.test']);
+  git(['config', 'user.name', 'audit-fixture']);
+  writeFileSync(join(repo, 'calc.py'), 'def add(a, b):\n    return a + b\n');
+  writeFileSync(join(repo, 'test_calc.py'), [
+    'import unittest',
+    'from calc import add',
+    '',
+    '',
+    'class TestCalc(unittest.TestCase):',
+    '    def test_add(self):',
+    '        self.assertEqual(add(1, 2), 3)',
+    '',
+    '    def test_add_again(self):',
+    '        self.assertEqual(add(2, 2), 4)',
+    '',
+    '',
+    "if __name__ == '__main__':",
+    '    unittest.main()',
+    '',
+  ].join('\n'));
+  git(['add', '.']);
+  git(['commit', '-qm', 'base']);
+  return { repo, git };
 }
 
 describe('runAudit end-to-end on a fixture repo', () => {
@@ -246,6 +321,32 @@ describe('runAudit end-to-end on a fixture repo', () => {
       const report = runAudit({ repoDir: repo, headRef: base, claimsText: 'Docs only.' });
       assert.equal(report.verdict, 'no_claims');
       assert.equal(report.exitCode, 3);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test('verified when a python -m unittest claim replays as claimed', () => {
+    // Regression: swrm M2 attempt 1 — a genuine `python -m unittest` pass
+    // was reported no_claims. stdlib unittest only, no pytest needed.
+    const { repo } = makePythonFixtureRepo();
+    try {
+      const base = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim();
+      const diff = makeDiff(repo, () => {
+        writeFileSync(join(repo, 'calc.py'), 'def add(a, b):\n    return a + b\n\n\ndef sub(a, b):\n    return a - b\n');
+      });
+      const report = runAudit({
+        repoDir: repo,
+        diffText: diff,
+        baseRef: base,
+        claimsText: 'Tests: `python3 -m unittest test_calc` — 2 tests, all pass.',
+      });
+      assert.equal(report.verdict, 'verified', JSON.stringify(report, null, 2));
+      assert.equal(report.claims[0].command, 'python3 -m unittest test_calc');
+      assert.equal(report.claims[0].replay.exit, 0);
+      assert.equal(report.claims[0].replay.counts.passed, 2);
+      assert.equal(report.claims[0].replay.counts.failed, 0);
+      assert.equal(report.i6d.applicable, false);
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }

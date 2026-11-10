@@ -46,6 +46,7 @@ export const TEST_COMMAND_PATTERNS = [
   /node\s+--test\b/,
   /pytest\b/,
   /python3?\s+-m\s+pytest\b/,
+  /python3?\s+-m\s+unittest\b/,
   /go\s+test\b/,
   /cargo\s+test\b/,
   /mvn\s+(?:-[^ ]+\s+)*test\b/,
@@ -54,7 +55,7 @@ export const TEST_COMMAND_PATTERNS = [
 
 const COMMAND_CHARS = String.raw`[\w@./:+\-='"]`;
 const COMMAND_TAIL = new RegExp(
-  String.raw`(?:npm\s+test|npm\s+run\s+[\w:.-]+|pnpm\s+test|yarn\s+test|node\s+--test(?:\s+${COMMAND_CHARS}+)*|pytest(?:\s+${COMMAND_CHARS}+)*|python3?\s+-m\s+pytest(?:\s+${COMMAND_CHARS}+)*|go\s+test(?:\s+${COMMAND_CHARS}+)*|cargo\s+test(?:\s+${COMMAND_CHARS}+)*|mvn\s+(?:-[^\s]+\s+)*test|npx\s+[\w@./-]+(?:\s+${COMMAND_CHARS}+)*)`,
+  String.raw`(?:npm\s+test|npm\s+run\s+[\w:.-]+|pnpm\s+test|yarn\s+test|node\s+--test(?:\s+${COMMAND_CHARS}+)*|pytest(?:\s+${COMMAND_CHARS}+)*|python3?\s+-m\s+pytest(?:\s+${COMMAND_CHARS}+)*|python3?\s+-m\s+unittest(?:\s+${COMMAND_CHARS}+)*|go\s+test(?:\s+${COMMAND_CHARS}+)*|cargo\s+test(?:\s+${COMMAND_CHARS}+)*|mvn\s+(?:-[^\s]+\s+)*test|npx\s+[\w@./-]+(?:\s+${COMMAND_CHARS}+)*)`,
 );
 
 export function isTestCommand(text) {
@@ -317,6 +318,7 @@ export function parseDiffFiles(diffText) {
 /**
  * Parse pass/fail counts out of a test runner's output.
  * node --test ("# pass 18", "# fail 0"), pytest ("18 passed, 0 failed"),
+ * python -m unittest ("Ran 18 tests" + "OK" / "FAILED (failures=1, errors=0)"),
  * mocha ("18 passing"), npm-wrapped node --test (same "# pass" lines).
  */
 export function parseReplayCounts(output, command) {
@@ -333,6 +335,30 @@ export function parseReplayCounts(output, command) {
     return { passed: nodePass, failed: nodeFail, total: nodeFail !== null ? nodePass + nodeFail : null };
   }
   if (nodePasses.length > 1 || nodeFails.length > 1) return null;
+  // python -m unittest prints one summary per run: "Ran N tests in ...",
+  // then "OK" (optionally "OK (skipped=S)") or "FAILED (failures=F,
+  // errors=E)". Same count semantics as the pytest branch below:
+  // passed = ran - failed (- skipped on an OK run).
+  const ran = text.match(/Ran (\d+) tests? in /);
+  if (ran) {
+    const total = Number(ran[1]);
+    const ok = text.match(/\nOK(?: \(skipped=(\d+)\))?\s*$/);
+    if (ok) {
+      const skipped = ok[1] !== undefined ? Number(ok[1]) : 0;
+      return { passed: total - skipped, failed: 0, total };
+    }
+    let m = text.match(/FAILED \(failures=(\d+)(?:, errors=(\d+))?\)/);
+    if (m) {
+      const failed = Number(m[1]) + (m[2] !== undefined ? Number(m[2]) : 0);
+      return { passed: total - failed, failed, total };
+    }
+    m = text.match(/FAILED \(errors=(\d+)\)/);
+    if (m) {
+      const failed = Number(m[1]);
+      return { passed: total - failed, failed, total };
+    }
+    return null;
+  }
   let m = text.match(/(\d+)\s+passed?(?:,\s*(\d+)\s+failed?)?/);
   if (m) {
     return { passed: Number(m[1]), failed: m[2] !== undefined ? Number(m[2]) : null, total: null };
