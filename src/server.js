@@ -23,6 +23,7 @@ import {
 } from './core/mission-state.js';
 import { mutateStore, readStore, resolveDataFile } from './core/state-store.js';
 import { readExecutionLog, resolveExecutionLogPath } from './core/execution-log.js';
+import { readEntriesFromOffset, readExecutionLogSize, resolveEntryOffset } from './core/log-tail.js';
 import { ackPendingGate, listPendingGates } from './core/pending-gates.js';
 import { prepareWorkflowRerun } from './core/workflow-rerun.js';
 import { readBinding } from './core/bindings.js';
@@ -140,7 +141,11 @@ function sendHtml(response, statusCode, html) {
   response.end(html);
 }
 
-function sendEvent(response, event, payload) {
+function sendEvent(response, event, payload, id) {
+  if (response.writableEnded || response.destroyed) return;
+  // `id` is optional: entries written by older builds carry no entry_hash, and an empty id line
+  // would make the browser replay from a meaningless position.
+  if (id) response.write(`id: ${id}\n`);
   response.write(`event: ${event}\n`);
   response.write(`data: ${JSON.stringify(payload)}\n\n`);
 }
@@ -526,10 +531,22 @@ function renderDashboardHtml() {
           '</div>'
         )).join('') || '<div class="meta">No pending gates</div>';
       }
-      function renderActivity(entries) {
-        document.getElementById('activity').innerHTML = entries.map((entry) => (
-          '<li><div><strong>' + (entry.atom_id || entry.kind || 'event') + '</strong></div>' +
-          '<div class="meta">' + [
+      let activityEntries = [];
+      // Hashes already on screen. Seeded from the snapshot as well as from log events: an
+      // entry can arrive twice, once inside the snapshot and once as a stream event written
+      // between the snapshot read and the point where the stream started.
+      const seenHashes = new Set();
+      function describeEntry(entry) {
+        if (entry.kind === 'agent_event') {
+          const detail = entry.text || entry.args_preview || entry.reason || '';
+          return {
+            title: entry.event + (entry.tool ? ' · ' + entry.tool : ''),
+            meta: [entry.phase, entry.atom, detail ? String(detail).slice(0, 120) : '', entry.timestamp],
+          };
+        }
+        return {
+          title: entry.atom_id || entry.kind || 'event',
+          meta: [
             entry.phase_id,
             entry.status,
             entry.adapter,
@@ -537,8 +554,44 @@ function renderDashboardHtml() {
             entry.artifact_type,
             entry.parallel_weight ? 'weight ' + entry.parallel_weight : '',
             entry.timestamp,
-          ].filter(Boolean).join(' · ') + '</div></li>'
-        )).join('') || '<li class="meta">No execution activity yet</li>';
+          ],
+        };
+      }
+      function paintActivity() {
+        document.getElementById('activity').innerHTML = activityEntries.map((entry) => {
+          const view = describeEntry(entry);
+          return '<li><div><strong>' + view.title + '</strong></div>' +
+            '<div class="meta">' + view.meta.filter(Boolean).join(' · ') + '</div></li>';
+        }).join('') || '<li class="meta">No execution activity yet</li>';
+      }
+      // A snapshot carries entries a log event may already have painted. Merging by entry_hash
+      // instead of replacing the list keeps anything that arrived while the snapshot was in
+      // flight (replacing it made those rows disappear again for up to one snapshot interval).
+      // Entries already on screen stay first: they are strictly newer than anything the snapshot
+      // adds, so this preserves file order without trusting timestamps.
+      function renderActivity(entries, options) {
+        const incoming = entries.slice(0, 20);
+        for (const entry of incoming) {
+          if (entry.entry_hash) seenHashes.add(entry.entry_hash);
+        }
+        if (options && options.merge) {
+          const merged = activityEntries.slice();
+          const seen = new Set(merged.map((entry) => entry.entry_hash).filter(Boolean));
+          for (const entry of incoming) {
+            if (entry.entry_hash && seen.has(entry.entry_hash)) continue;
+            if (entry.entry_hash) seen.add(entry.entry_hash);
+            merged.push(entry);
+          }
+          activityEntries = merged.slice(0, 20);
+        } else {
+          activityEntries = incoming;
+        }
+        paintActivity();
+      }
+      function appendActivity(entry) {
+        activityEntries.unshift(entry);
+        if (activityEntries.length > 20) activityEntries.length = 20;
+        paintActivity();
       }
       async function refreshFallback() {
         const [summaryRes, gatesRes, logsRes] = await Promise.all([
@@ -617,7 +670,15 @@ function renderDashboardHtml() {
           const payload = JSON.parse(event.data);
           renderSummary(payload.summary);
           renderGates(payload.pending_gates || []);
-          renderActivity(payload.execution_log?.entries || []);
+          renderActivity(payload.execution_log?.entries || [], { merge: true });
+        });
+        events.addEventListener('log', (event) => {
+          const entry = JSON.parse(event.data);
+          if (entry.entry_hash) {
+            if (seenHashes.has(entry.entry_hash)) return;
+            seenHashes.add(entry.entry_hash);
+          }
+          appendActivity(entry);
         });
         events.onerror = () => {
           events.close();
@@ -816,22 +877,68 @@ export default async function startServer(options = {}) {
       });
       response.write('\n');
 
+      let closed = false;
+      let offset = null;
+
       const sendSnapshot = async () => {
         const nextState = await readStore(dataFile);
         sendEvent(response, 'snapshot', await buildSnapshot(projectRoot, nextState));
       };
 
+      // Append-only tail of the execution log. Each entry is one `log` event whose SSE id is the
+      // entry hash, so a reconnecting client resumes from Last-Event-ID instead of re-reading.
+      const sendNewEntries = async () => {
+        const batch = await readEntriesFromOffset(projectRoot, offset, { limit: 100 });
+        offset = batch.nextOffset;
+        for (const entry of batch.entries) {
+          sendEvent(response, 'log', entry, entry.entry_hash);
+        }
+      };
+
+      const lastEventId = String(request.headers['last-event-id'] || '').trim();
+      if (lastEventId) {
+        const resumed = await resolveEntryOffset(projectRoot, lastEventId);
+        if (resumed !== null) offset = resumed;
+      }
+
+      if (offset === null) {
+        // A fresh client already has history in the snapshot, so follow only entries from here on.
+        // The offset is taken before the snapshot is written: anything that lands in between is
+        // tailed right after it and deduplicated client-side by entry_hash, so nothing is missed.
+        offset = await readExecutionLogSize(projectRoot);
+      }
+
+      // Snapshot stays the first frame: the dashboard relies on it for summary and gates.
+      await sendSnapshot();
+      await sendNewEntries().catch(() => {});
+
+      const tail = async () => {
+        if (closed) return;
+        try {
+          await sendNewEntries();
+        } catch {
+          // A transient read failure must not kill the stream; the next tick retries.
+        }
+      };
+
       const heartbeat = setInterval(() => {
-        response.write(': ping\n\n');
+        if (!closed) response.write(': ping\n\n');
       }, 15000);
       const timer = setInterval(() => {
-        sendSnapshot().catch(() => {});
+        if (!closed) sendSnapshot().catch(() => {});
       }, 3000);
+      // One tailer per connection: the read is a stat plus a short read from the last offset, so a
+      // dashboard tab costs a few hundred bytes per tick. If many clients ever watch the same run,
+      // the cheaper shape is one shared tailer broadcasting to all responses.
+      const tailer = setInterval(() => {
+        tail().catch(() => {});
+      }, 200);
 
-      await sendSnapshot();
       request.on('close', () => {
+        closed = true;
         clearInterval(timer);
         clearInterval(heartbeat);
+        clearInterval(tailer);
       });
       return;
     }

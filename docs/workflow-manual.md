@@ -17,7 +17,8 @@
 9. [CLI 参考](#9-cli-参考)
 10. [本地 Release Checklist](#10-本地-release-checklist)
 11. [环境变量](#11-环境变量)
-12. [常见问题](#12-常见问题)
+12. [实时事件流（agent 进度）](#12-实时事件流agent-进度)
+13. [常见问题](#13-常见问题)
 
 ---
 
@@ -1077,7 +1078,109 @@ sh xflow/scripts/check_installed_xflow_skill_sync.sh
 
 ---
 
-## 12. 常见问题
+## 12. 实时事件流（agent 进度）
+
+`agent_invoke` 一次调用默认最长 300 秒（heavy CLI 1800 秒），期间 agent 的 stdout 以前只累加进字符串，运行结束时才有一条 `atom_run`。现在这段时间里发生的事会以 `agent_event` 条目写入 `.as-xflow/logs/execution.ndjson`，并通过 `/api/events` 增量推给看板。
+
+### 数据通路
+
+```
+codex exec --json  /  claude -p --output-format stream-json
+        │  stdout（NDJSON，逐行）
+        ▼
+src/core/agent-stream.js   createLineSplitter → normalizeAgentEvent → 200ms 合并
+        │  appendExecutionLog({ kind: 'agent_event', … })
+        ▼
+.as-xflow/logs/execution.ndjson   （既有 hash 链，一条一条追加）
+        │  src/core/log-tail.js   readEntriesFromOffset(offset)
+        ▼
+GET /api/events   event: log, id: <entry_hash>
+```
+
+写入侧只做归一化与截断，读侧只做字节偏移 tail；两侧都复用既有的执行日志，没有新增文件、没有新增依赖。
+
+只有能逐行输出 NDJSON 的 adapter 会接上这条通路：`codex_cli`（`codex exec --json`）与 `claude_cli`（`claude -p --output-format stream-json`）。`pencil_cli` 没有对应的 JSON 行协议，`stub` 根本没有子进程，因此这两者不产生 `agent_event`，其进度只能看到 phase/atom 级的 `atom_run` 记录——这是刻意的，不是遗漏。
+
+### 事件类型
+
+| event | 来源 | 关键字段 |
+|---|---|---|
+| `agent_start` | codex `thread.started` / claude `system:init` | `adapter` |
+| `tool_start` | codex `item.started`：`command_execution`(→ `tool`=`shell`)、`mcp_tool_call`、`file_change`、`web_search`；claude `tool_use` | `event_type`(CLI 原始 item 类型), `tool`, `args_preview`(≤160 字符), `args_digest`(sha256 前 16 位) |
+| `tool_end` | codex `item.completed` 的同四种 item 类型（`event_type` 区分）；claude 侧没有配对事件 | `event_type`, `tool`, `exit_code`, `status` |
+| `message_end` | codex `agent_message` / claude assistant `text` | `text`(≤2048 字符，超出以 `…` 结尾) |
+| `agent_end` | codex `turn.completed` / claude `result` | `usage`{`input`,`output`,`cache_read`,`cache_write`}, `cost_usd`, `duration_ms` |
+| `raw` | 无法识别、无法解析、或超长被截断的行；CLI 报错（`turn.failed` / `error`） | `reason`(`invalid_json` / `non_object_payload` / `line_truncated`), `event_type`, `level`(`error`), `truncated` |
+
+每条记录的完整形状：
+
+```json
+{
+  "timestamp": "2026-11-09T04:12:33.412Z",
+  "kind": "agent_event",
+  "event": "tool_start",
+  "phase": "implementation",
+  "atom": "I6a.tdd.run",
+  "adapter": "codex_cli",
+  "seq": 3,
+  "event_type": "command_execution",
+  "tool": "shell",
+  "args_preview": "npm test",
+  "args_digest": "9f2c1e0b7d4a5c88",
+  "change_id": "chg-124",
+  "mission_id": "mis-9",
+  "prev_hash": "…",
+  "entry_hash": "…"
+}
+```
+
+未知的 CLI 事件类型一律降级为 `raw` 或被忽略，不抛错：CLI 升级不会让整条 workflow 失败。
+
+### 订阅
+
+```javascript
+const events = new EventSource('/api/events');
+const seen = new Set();
+
+events.addEventListener('snapshot', () => { /* 首帧仍是全量快照，可整体重置 UI */ });
+events.addEventListener('log', (message) => {
+  const entry = JSON.parse(message.data);
+  if (entry.entry_hash && seen.has(entry.entry_hash)) return;  // 快照与增量可能重叠
+  if (entry.entry_hash) seen.add(entry.entry_hash);
+  renderActivity(entry);
+});
+```
+
+- 首帧永远是 `event: snapshot`（与旧行为一致），之后才是增量。
+- 增量帧带 `id: <entry_hash>`；浏览器断线重连会自动带上 `Last-Event-ID`，服务端据此回放缺失条目，不丢也不重。
+- 若该 id 对应的日志已被删除或轮转，服务端回退为正常跟随（客户端拿不到历史，只收到之后的新条目）。
+- `event: snapshot` 仍然每 3 秒重发一次。增量流只解决了“一条条新条目怎么到达”，没有取消全量快照：看板的 summary、pending gates、pending tasks 都由快照刷新，增量帧里没有这些字段。也就是说常驻连接的主要带宽仍是快照；要再降，需要把 summary/gates 也改成增量事件，那是另一个 PR 的边界。
+- 排序一律以文件顺序为准，不要用 `timestamp` 排序：同一毫秒内可能有多条。
+
+### CLI 进度输出
+
+```bash
+CHANGE_ID=<id> xflow workflow run workflows/yolo.yaml --progress
+```
+
+`--progress` 是 opt-in 的：不加时终端输出与以前逐字节一致。开启后每 200ms 把新条目打印到 stderr（stdout 留给 workflow 自己的输出），例如：
+
+```
+[progress] 12:13:02 agent tool_start · shell
+[progress] 12:13:41 agent message_end · Tests pass; writing the artifact.
+[progress] 12:13:44 atom_run I6a.tdd.run completed
+```
+
+### 性能约束
+
+- 写入：每 200ms 合并一次，单条 `text` ≤2048 字符、`args_preview` ≤160 字符；队列上限 500，超出丢最旧条目并计入 `stats.dropped`。
+- 读取：只从字节偏移往后读，单次 ≤4MB；未写完的尾行留到下次；游标只停在换行边界。
+- 哈希链：追加时从文件尾部 16KB 起求 `prev_hash`；若窗口里没有完整行（单条记录大于 16KB），窗口按 4 倍扩大直到找到为止，否则会写出 `prev_hash: null` 把链断掉。缓存按 `(size, mtimeMs)` 失效，避免同尺寸的轮转或截断命中陈旧哈希。
+- 订阅：每个 SSE 连接各自持有一个 200ms 的 tailer，一次 tick 是“stat + 从上次偏移读一小段”，单个看板标签页可以忽略；若将来有大量客户端同时观看同一 run，更省的形状是**一个共享 tailer 广播给所有连接**（当前版本未做）。
+
+---
+
+## 13. 常见问题
 
 ### workflow 停在 human gate 怎么恢复？
 

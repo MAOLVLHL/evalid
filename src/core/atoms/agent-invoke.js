@@ -10,6 +10,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, copyFileSync, statS
 import { resolve, dirname } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { persistSyntheticPhaseRun, defaultVerdictForPhase } from '../../agent_team/common.js';
+import { createAgentEventSink } from '../agent-stream.js';
 import { resolveChangePath, writeJsonFile, writeTextFile } from '../change-artifacts.js';
 
 const ROOT = resolve(import.meta.dirname, '..', '..', '..');
@@ -65,6 +66,12 @@ export default async function agentInvoke(args, context) {
       changeDir,
       expectedArtifact: artifactPath,
       model: agentCfg.model || process.env.XFLOW_CODEX_MODEL || DEFAULT_CODEX_MODEL,
+      projectRoot,
+      changeId,
+      phaseId: phase?.id || null,
+      atomId: taskPackage.atom_id,
+      missionId: context.runtime?.missionId || null,
+      adapterName: 'codex_cli',
     });
     return {
       ...result,
@@ -82,6 +89,12 @@ export default async function agentInvoke(args, context) {
       retryDelayMs,
       changeDir,
       expectedArtifact: artifactPath,
+      projectRoot,
+      changeId,
+      phaseId: phase?.id || null,
+      atomId: taskPackage.atom_id,
+      missionId: context.runtime?.missionId || null,
+      adapterName: 'claude_cli',
     });
     return {
       ...result,
@@ -258,6 +271,24 @@ function resolveArtifactPath(artifacts, changeId, projectRoot) {
   return resolve(projectRoot, 'specs', 'changes', changeId, 'artifact.json');
 }
 
+// Progress telemetry is optional: a project root is only absent when an atom is invoked
+// directly by a test harness, and in that case the run must still work without a log.
+function createAgentStreamSink(opts) {
+  if (!opts.projectRoot) return null;
+  try {
+    return createAgentEventSink({
+      projectRoot: opts.projectRoot,
+      changeId: opts.changeId || null,
+      missionId: opts.missionId || null,
+      phase: opts.phaseId || null,
+      atom: opts.atomId || null,
+      adapter: opts.adapterName || 'unknown',
+    });
+  } catch {
+    return null;
+  }
+}
+
 async function runProc(cmd, args, opts) {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, {
@@ -274,7 +305,16 @@ async function runProc(cmd, args, opts) {
     let timeoutHandle = null;
     let killHandle = null;
     let artifactPollHandle = null;
-    child.stdout.on('data', (d) => { stdout += d.toString(); });
+    child.stdout.on('data', (d) => {
+      stdout += d.toString();
+      if (opts.onData) {
+        try {
+          opts.onData(d);
+        } catch {
+          // Telemetry must never be able to break an agent run.
+        }
+      }
+    });
     child.stderr.on('data', (d) => { stderr += d.toString(); });
     child.on('error', (error) => {
       if (timeoutHandle) clearTimeout(timeoutHandle);
@@ -356,41 +396,52 @@ async function runCodexExec(prompt, opts) {
     args.push('--model', opts.model);
   }
   args.push(prompt);
-  let { code, signal, stdout, stderr, timedOut, forceKilled, earlyArtifactExit, artifact } = await runProc('codex', args, { cwd: opts.cwd, timeoutMs: opts.timeoutMs, killAfterMs: opts.killAfterMs, input: '', expectedArtifact: opts.expectedArtifact });
-  const output = artifact || await resolveOutputJson(opts.expectedArtifact, 10_000);
-  let timedOutRecovered = false;
-  if (output && timedOut) {
-    timedOutRecovered = true;
-    code = 0;
-    signal = null;
-    timedOut = false;
-    stderr += '\n[agent_invoke] valid artifact detected after timeout; accepting artifact output';
+  const sink = createAgentStreamSink(opts);
+  try {
+    let { code, signal, stdout, stderr, timedOut, forceKilled, earlyArtifactExit, artifact } = await runProc('codex', args, { cwd: opts.cwd, timeoutMs: opts.timeoutMs, killAfterMs: opts.killAfterMs, input: '', expectedArtifact: opts.expectedArtifact, onData: sink ? (chunk) => sink.push(chunk) : null });
+    const output = artifact || await resolveOutputJson(opts.expectedArtifact, 10_000);
+    let timedOutRecovered = false;
+    if (output && timedOut) {
+      timedOutRecovered = true;
+      code = 0;
+      signal = null;
+      timedOut = false;
+      stderr += '\n[agent_invoke] valid artifact detected after timeout; accepting artifact output';
+    }
+    if (output && earlyArtifactExit) {
+      code = 0;
+      signal = null;
+    }
+    return { code, signal, stdout, stderr, artifact: output, timedOut, forceKilled, timedOutRecovered, earlyArtifactExit };
+  } finally {
+    if (sink) await sink.close().catch(() => {});
   }
-  if (output && earlyArtifactExit) {
-    code = 0;
-    signal = null;
-  }
-  return { code, signal, stdout, stderr, artifact: output, timedOut, forceKilled, timedOutRecovered, earlyArtifactExit };
 }
 
 async function runClaudeCli(prompt, opts) {
-  let { code, signal, stdout, stderr, timedOut, forceKilled, earlyArtifactExit, artifact } = await runProc('claude', [
-    '-p', '--dangerously-skip-permissions', '--no-session-persistence', prompt,
-  ], { cwd: opts.cwd, timeoutMs: opts.timeoutMs, killAfterMs: opts.killAfterMs, input: '', expectedArtifact: opts.expectedArtifact });
-  const output = artifact || await resolveOutputJson(opts.expectedArtifact, 10_000);
-  let timedOutRecovered = false;
-  if (output && timedOut) {
-    timedOutRecovered = true;
-    code = 0;
-    signal = null;
-    timedOut = false;
-    stderr += '\n[agent_invoke] valid artifact detected after timeout; accepting artifact output';
+  const sink = createAgentStreamSink(opts);
+  try {
+    let { code, signal, stdout, stderr, timedOut, forceKilled, earlyArtifactExit, artifact } = await runProc('claude', [
+      '-p', '--dangerously-skip-permissions', '--no-session-persistence',
+      '--output-format', 'stream-json', '--verbose', prompt,
+    ], { cwd: opts.cwd, timeoutMs: opts.timeoutMs, killAfterMs: opts.killAfterMs, input: '', expectedArtifact: opts.expectedArtifact, onData: sink ? (chunk) => sink.push(chunk) : null });
+    const output = artifact || await resolveOutputJson(opts.expectedArtifact, 10_000);
+    let timedOutRecovered = false;
+    if (output && timedOut) {
+      timedOutRecovered = true;
+      code = 0;
+      signal = null;
+      timedOut = false;
+      stderr += '\n[agent_invoke] valid artifact detected after timeout; accepting artifact output';
+    }
+    if (output && earlyArtifactExit) {
+      code = 0;
+      signal = null;
+    }
+    return { code, signal, stdout, stderr, artifact: output, timedOut, forceKilled, timedOutRecovered, earlyArtifactExit };
+  } finally {
+    if (sink) await sink.close().catch(() => {});
   }
-  if (output && earlyArtifactExit) {
-    code = 0;
-    signal = null;
-  }
-  return { code, signal, stdout, stderr, artifact: output, timedOut, forceKilled, timedOutRecovered, earlyArtifactExit };
 }
 
 async function runPencilCli(prompt, opts) {

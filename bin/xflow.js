@@ -42,6 +42,7 @@ import { createHash } from 'crypto';
 import { tmpdir } from 'os';
 import { ackPendingGate } from '../src/core/pending-gates.js';
 import { runAudit, renderAuditReport } from '../src/core/audit.js';
+import { readEntriesFromOffset, readExecutionLogSize } from '../src/core/log-tail.js';
 import { exportDomRectsToFile, resolveCliPath } from '../src/agent_team/atoms/visual/dom-rect-export.js';
 import { capturePageEvidence } from '../src/agent_team/atoms/visual/page-evidence-capture.js';
 import { computeImageDiffMetrics } from '../src/agent_team/atoms/visual/image-diff.js';
@@ -5508,7 +5509,12 @@ async function handleWorkflow(sub, args) {
           changeId,
           input,
         });
-        await executor.run();
+        const progress = args.includes('--progress') ? startProgressTail(projectRoot) : null;
+        try {
+          await executor.run();
+        } finally {
+          if (progress) await progress.stop();
+        }
       }
       break;
     }
@@ -5536,6 +5542,72 @@ async function handleWorkflow(sub, args) {
       console.error('Available: run, validate');
       process.exit(1);
   }
+}
+
+// ─── progress tail ────────────────────────────────────────────────────────────
+
+const PROGRESS_TICK_MS = 200;
+
+/**
+ * Follow the execution log on stderr while a workflow runs.
+ *
+ * Opt-in (`--progress`) so the default CLI output stays byte-identical, and stderr-only so it
+ * cannot corrupt anything a caller pipes out of stdout.
+ */
+function startProgressTail(projectRoot, { tickMs = PROGRESS_TICK_MS } = {}) {
+  let offset = null;
+  let stopped = false;
+  let draining = Promise.resolve();
+
+  const drain = async () => {
+    if (offset === null) offset = await readExecutionLogSize(projectRoot);
+    // A run that emits faster than one tick writes more than a single batch, so keep reading
+    // until the log is caught up: one capped read left the tail of a chatty run unprinted.
+    for (;;) {
+      const from = offset;
+      const batch = await readEntriesFromOffset(projectRoot, from, { limit: 100 });
+      offset = batch.nextOffset;
+      for (const entry of batch.entries) {
+        process.stderr.write(`${formatProgressEntry(entry)}\n`);
+      }
+      // Stop when the log is caught up, or when the last batch could not advance past a
+      // half-written entry (re-read on the next tick or on shutdown).
+      if (!batch.hasMore || offset <= from) return;
+    }
+  };
+
+  draining = drain().catch(() => {});
+  const timer = setInterval(() => {
+    if (stopped) return;
+    draining = draining.then(drain).catch(() => {});
+  }, tickMs);
+
+  return {
+    async stop() {
+      stopped = true;
+      clearInterval(timer);
+      await draining.catch(() => {});
+      // Drain whatever was written between the last tick and shutdown.
+      await drain().catch(() => {});
+    },
+  };
+}
+
+function formatProgressEntry(entry) {
+  const time = String(entry.timestamp || '').slice(11, 19);
+  if (entry.kind === 'agent_event') {
+    const detail = entry.tool || entry.text || entry.reason || entry.event_type || '';
+    return `[progress] ${time} agent ${entry.event}${detail ? ' · ' + singleLine(detail) : ''}`;
+  }
+  const subject = entry.atom_id || entry.phase_id || null;
+  const parts = [entry.kind || 'event'];
+  if (subject && subject !== entry.kind) parts.push(subject);
+  if (entry.status) parts.push(entry.status);
+  return `[progress] ${time} ${parts.join(' ')}`;
+}
+
+function singleLine(value) {
+  return String(value).replace(/\s+/g, ' ').slice(0, 120);
 }
 
 const CORPS_PROOF_ARTIFACTS = [
@@ -6703,7 +6775,8 @@ function printWorkflowHelp() {
 Usage: xflow workflow <command>
 
 Commands:
-  run <yaml|yolo|corps>       Run a workflow (add --dry-run to preview)
+  run <yaml|yolo|corps>       Run a workflow (add --dry-run to preview,
+                              --progress to follow agent events on stderr)
   validate <yaml|yolo|corps>  Validate workflow YAML as preflight only
 
 Options:
