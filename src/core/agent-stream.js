@@ -23,6 +23,9 @@ export const DEFAULT_FLUSH_INTERVAL_MS = 200;
 const MAX_TEXT_CHARS = 2048;
 const MAX_PREVIEW_CHARS = 160;
 const MAX_QUEUE_LENGTH = 500;
+// While a line is being dropped, only this much of it is kept: enough to see the newline that
+// ends it, never enough to matter.
+const DROP_TAIL_CHARS = 1024;
 
 /**
  * Split a byte stream into complete lines.
@@ -67,10 +70,14 @@ export function createLineSplitter(onLine, options = {}) {
       if (chunk === undefined || chunk === null) return;
       buffer += typeof chunk === 'string' ? chunk : decoder.write(chunk);
       drain();
-      if (!dropping && buffer.length > maxLineBytes) {
-        emit(JSON.stringify({ type: 'xflow.line_truncated', bytes: buffer.length }));
-        buffer = '';
-        dropping = true;
+      if (buffer.length > maxLineBytes) {
+        if (!dropping) {
+          emit(JSON.stringify({ type: 'xflow.line_truncated', bytes: buffer.length }));
+          dropping = true;
+        }
+        // The runaway line was already replaced by its marker, so only its tail is kept: without
+        // this a stream that never sends a newline grew the buffer without bound.
+        buffer = buffer.slice(-DROP_TAIL_CHARS);
       }
     },
     flush() {

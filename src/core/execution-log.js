@@ -7,7 +7,8 @@ const TAIL_WINDOW_BYTES = 16_384;
 
 // Tail anchors are cached per log file: an append only needs the previous entry_hash, and
 // re-reading a multi-megabyte log for every event made appends O(n^2). The cache is keyed by
-// file size, so an external writer (another xflow process, a rotated log) invalidates it.
+// (size, mtimeMs) so an external writer (another xflow process, a rotated or truncated log that
+// lands on the same size) invalidates it instead of serving a stale anchor.
 const tailStateCache = new Map();
 
 function nowIso() {
@@ -43,11 +44,7 @@ async function appendExecutionLogUnlocked(projectRoot, entry = {}) {
   // parseable instead of being glued onto the fragment.
   const line = `${tail.size > 0 && !tail.endsWithNewline ? '\n' : ''}${JSON.stringify(payload)}\n`;
   await appendFile(file, line, 'utf8');
-  tailStateCache.set(file, {
-    size: tail.size + Buffer.byteLength(line, 'utf8'),
-    hash: payload.entry_hash,
-    endsWithNewline: true,
-  });
+  await rememberAppendedTail(file, payload.entry_hash);
   return file;
 }
 
@@ -63,11 +60,7 @@ export function appendExecutionLogSync(projectRoot, entry = {}) {
   payload.entry_hash = buildLogEntryHash(payload);
   const line = `${tail.size > 0 && !tail.endsWithNewline ? '\n' : ''}${JSON.stringify(payload)}\n`;
   appendFileSync(file, line, 'utf8');
-  tailStateCache.set(file, {
-    size: tail.size + Buffer.byteLength(line, 'utf8'),
-    hash: payload.entry_hash,
-    endsWithNewline: true,
-  });
+  rememberAppendedTailSync(file, payload.entry_hash);
   return file;
 }
 
@@ -106,18 +99,19 @@ async function readTailState(file) {
   try {
     const info = await stat(file);
     const cached = tailStateCache.get(file);
-    if (cached && cached.size === info.size) {
+    if (cached && cached.size === info.size && cached.mtimeMs === info.mtimeMs) {
       return cached;
     }
     const state = {
       size: info.size,
+      mtimeMs: info.mtimeMs,
       hash: await readTailHash(file, info.size),
       endsWithNewline: await tailEndsWithNewline(file, info.size),
     };
     tailStateCache.set(file, state);
     return state;
   } catch {
-    return { size: 0, hash: null, endsWithNewline: true };
+    return { size: 0, mtimeMs: null, hash: null, endsWithNewline: true };
   }
 }
 
@@ -125,24 +119,50 @@ function readTailStateSync(file) {
   try {
     const info = statSync(file);
     const cached = tailStateCache.get(file);
-    if (cached && cached.size === info.size) {
+    if (cached && cached.size === info.size && cached.mtimeMs === info.mtimeMs) {
       return cached;
     }
     const state = {
       size: info.size,
+      mtimeMs: info.mtimeMs,
       hash: readTailHashSync(file, info.size),
       endsWithNewline: tailEndsWithNewlineSync(file, info.size),
     };
     tailStateCache.set(file, state);
     return state;
   } catch {
-    return { size: 0, hash: null, endsWithNewline: true };
+    return { size: 0, mtimeMs: null, hash: null, endsWithNewline: true };
   }
 }
 
 async function readTailHash(file, size) {
   if (!size) return null;
-  const start = Math.max(0, size - TAIL_WINDOW_BYTES);
+  // The window must contain at least one complete line to anchor the chain. A single entry
+  // larger than the window (an error or detail field is unbounded) leaves no complete line, so
+  // the window grows until the previous entry comes into view. Returning null instead made the
+  // next append pick up prev_hash: null, which permanently breaks the chain after a restart or
+  // from a second process.
+  let windowBytes = TAIL_WINDOW_BYTES;
+  for (;;) {
+    const start = Math.max(0, size - windowBytes);
+    const hash = await readHashWindow(file, start, size);
+    if (hash !== null || start === 0) return hash;
+    windowBytes *= 4;
+  }
+}
+
+function readTailHashSync(file, size) {
+  if (!size) return null;
+  let windowBytes = TAIL_WINDOW_BYTES;
+  for (;;) {
+    const start = Math.max(0, size - windowBytes);
+    const hash = readHashWindowSync(file, start, size);
+    if (hash !== null || start === 0) return hash;
+    windowBytes *= 4;
+  }
+}
+
+async function readHashWindow(file, start, size) {
   const handle = await open(file, 'r');
   try {
     const buffer = Buffer.alloc(size - start);
@@ -155,9 +175,7 @@ async function readTailHash(file, size) {
   }
 }
 
-function readTailHashSync(file, size) {
-  if (!size) return null;
-  const start = Math.max(0, size - TAIL_WINDOW_BYTES);
+function readHashWindowSync(file, start, size) {
   const fd = openSync(file, 'r');
   try {
     const buffer = Buffer.alloc(size - start);
@@ -167,6 +185,38 @@ function readTailHashSync(file, size) {
     return null;
   } finally {
     closeSync(fd);
+  }
+}
+
+/**
+ * Record the anchor that was just written. One cheap stat keeps the cache key (size, mtimeMs)
+ * honest, so a later writer that rewrites the file at the same size invalidates the entry.
+ */
+async function rememberAppendedTail(file, entryHash) {
+  try {
+    const info = await stat(file);
+    tailStateCache.set(file, {
+      size: info.size,
+      mtimeMs: info.mtimeMs,
+      hash: entryHash,
+      endsWithNewline: true,
+    });
+  } catch {
+    tailStateCache.delete(file);
+  }
+}
+
+function rememberAppendedTailSync(file, entryHash) {
+  try {
+    const info = statSync(file);
+    tailStateCache.set(file, {
+      size: info.size,
+      mtimeMs: info.mtimeMs,
+      hash: entryHash,
+      endsWithNewline: true,
+    });
+  } catch {
+    tailStateCache.delete(file);
   }
 }
 

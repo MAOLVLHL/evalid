@@ -79,6 +79,19 @@ describe('Agent stream', () => {
       assert.equal(lines.length, 1);
       assert.equal(JSON.parse(lines[0]).type, 'xflow.line_truncated');
     });
+
+    test('keeps memory bounded when the stream never sends a newline', () => {
+      const lines = [];
+      const splitter = createLineSplitter((line) => lines.push(line), { maxLineBytes: 1024 });
+      for (let index = 0; index < 200; index += 1) splitter.push('z'.repeat(4096));
+      assert.equal(lines.length, 1, 'one marker per runaway line, not one per chunk');
+      assert.equal(JSON.parse(lines[0]).type, 'xflow.line_truncated');
+      assert.ok(splitter.pending <= 1024, `pending grew to ${splitter.pending} characters`);
+
+      splitter.push('\n{"type":"thread.started"}\n');
+      assert.equal(lines.at(-1), '{"type":"thread.started"}');
+      assert.equal(splitter.pending, 0);
+    });
   });
 
   describe('normalizeAgentEvents', () => {

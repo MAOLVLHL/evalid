@@ -7,7 +7,7 @@
  * (SSE Last-Event-ID). Every offset returned here sits on a line boundary, so a consumer never
  * observes half an entry.
  */
-import { open, readFile, stat } from 'node:fs/promises';
+import { open, stat } from 'node:fs/promises';
 import { resolveExecutionLogPath } from './execution-log.js';
 
 export const DEFAULT_TAIL_LIMIT = 200;
@@ -102,22 +102,39 @@ export async function resolveEntryOffset(projectRoot = process.cwd(), entryHash)
   const wanted = String(entryHash || '').trim();
   if (!wanted) return null;
   const file = resolveExecutionLogPath(projectRoot);
-  let raw;
+  let size;
   try {
-    raw = await readFile(file);
+    size = (await stat(file)).size;
   } catch {
     return null;
   }
+  if (!size) return null;
 
+  // A reconnect resolves a single hash, and the entry the client last saw is almost always
+  // among the most recent ones, so scan the tail first and widen the window until the log is
+  // covered. Every window ends at EOF on purpose: a window that stopped at an arbitrary offset
+  // would split an entry across two reads and never see it whole.
+  let windowBytes = OVERSCAN_BYTES;
+  for (;;) {
+    const start = Math.max(0, size - windowBytes);
+    const window = await readRange(file, start, size);
+    const offset = matchEntryOffset(window, start, wanted);
+    if (offset !== null) return offset;
+    if (start === 0) return null;
+    windowBytes *= 4;
+  }
+}
+
+function matchEntryOffset(window, base, wanted) {
   let cursor = 0;
-  while (cursor < raw.length) {
-    const newlineAt = raw.indexOf(0x0a, cursor);
+  while (cursor < window.length) {
+    const newlineAt = window.indexOf(0x0a, cursor);
     if (newlineAt === -1) break;
-    const line = raw.subarray(cursor, newlineAt).toString('utf8').trim();
+    const line = window.subarray(cursor, newlineAt).toString('utf8').trim();
     cursor = newlineAt + 1;
     if (!line) continue;
     try {
-      if (JSON.parse(line).entry_hash === wanted) return cursor;
+      if (JSON.parse(line).entry_hash === wanted) return base + cursor;
     } catch {
       // Corrupt lines cannot match a hash; keep scanning.
     }

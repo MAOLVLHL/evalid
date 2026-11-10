@@ -5546,10 +5546,18 @@ function startProgressTail(projectRoot, { tickMs = PROGRESS_TICK_MS } = {}) {
 
   const drain = async () => {
     if (offset === null) offset = await readExecutionLogSize(projectRoot);
-    const batch = await readEntriesFromOffset(projectRoot, offset, { limit: 100 });
-    offset = batch.nextOffset;
-    for (const entry of batch.entries) {
-      process.stderr.write(`${formatProgressEntry(entry)}\n`);
+    // A run that emits faster than one tick writes more than a single batch, so keep reading
+    // until the log is caught up: one capped read left the tail of a chatty run unprinted.
+    for (;;) {
+      const from = offset;
+      const batch = await readEntriesFromOffset(projectRoot, from, { limit: 100 });
+      offset = batch.nextOffset;
+      for (const entry of batch.entries) {
+        process.stderr.write(`${formatProgressEntry(entry)}\n`);
+      }
+      // Stop when the log is caught up, or when the last batch could not advance past a
+      // half-written entry (re-read on the next tick or on shutdown).
+      if (!batch.hasMore || offset <= from) return;
     }
   };
 

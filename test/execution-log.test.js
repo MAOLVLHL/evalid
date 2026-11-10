@@ -1,11 +1,17 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { WorkflowExecutor } from '../src/core/workflow-executor.js';
-import { readExecutionLog } from '../src/core/execution-log.js';
+import {
+  appendExecutionLog,
+  readExecutionLog,
+  readLastEntryHash,
+  resolveExecutionLogPath,
+} from '../src/core/execution-log.js';
+import { buildLogEntryHash } from '../src/core/workflow-integrity.js';
 import registry from '../atoms/registry.json' with { type: 'json' };
 
 function makeProjectRoot() {
@@ -165,6 +171,65 @@ describe('Execution log', () => {
 
       const log = await readExecutionLog(projectRoot, { limit: 100 });
       assert.equal(log.chain.ok, true, log.chain.issues.join('\n'));
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('keeps the hash chain intact when the last entry is larger than the tail window', async () => {
+    const projectRoot = makeProjectRoot();
+    try {
+      await appendExecutionLog(projectRoot, { kind: 'workflow_started', change_id: 'chg-big-tail' });
+      const file = resolveExecutionLogPath(projectRoot);
+      const firstHash = await readLastEntryHash(file);
+
+      // Written by someone else (a second xflow process, or a restart): the tail-anchor cache
+      // never saw this entry, and it is far larger than the 16KB hash window.
+      const big = {
+        timestamp: new Date().toISOString(),
+        kind: 'atom_run',
+        atom_id: 'I6a.tdd.run',
+        detail: 'x'.repeat(40_000),
+        prev_hash: firstHash,
+      };
+      big.entry_hash = buildLogEntryHash(big);
+      appendFileSync(file, `${JSON.stringify(big)}\n`, 'utf8');
+
+      await appendExecutionLog(projectRoot, { kind: 'phase_completed', phase_id: 'implementation' });
+
+      const log = await readExecutionLog(projectRoot, { limit: 10 });
+      assert.equal(log.entries[0].prev_hash, big.entry_hash);
+      assert.equal(log.chain.ok, true, log.chain.issues.join('\n'));
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('re-reads the tail anchor when the log is rewritten at the same size', async () => {
+    const projectRoot = makeProjectRoot();
+    try {
+      const file = resolveExecutionLogPath(projectRoot);
+      mkdirSync(resolve(projectRoot, '.as-xflow', 'logs'), { recursive: true });
+      const timestamp = new Date().toISOString();
+      const before = { timestamp, kind: 'phase_started', marker: 'same-length-a', prev_hash: null };
+      before.entry_hash = buildLogEntryHash(before);
+      writeFileSync(file, `${JSON.stringify(before)}\n`, 'utf8');
+      const bytesBefore = readFileSync(file, 'utf8').length;
+      assert.equal(await readLastEntryHash(file), before.entry_hash);
+
+      // Same byte length, different anchor: a rotation or truncate-and-rewrite. Size alone cannot
+      // tell these apart, so the cache also watches mtime.
+      const after = { timestamp, kind: 'phase_started', marker: 'same-length-b', prev_hash: null };
+      after.entry_hash = buildLogEntryHash(after);
+      writeFileSync(file, `${JSON.stringify(after)}\n`, 'utf8');
+      assert.equal(readFileSync(file, 'utf8').length, bytesBefore);
+      const future = new Date(Date.now() + 60_000);
+      utimesSync(file, future, future);
+
+      await appendExecutionLog(projectRoot, { kind: 'gate_check', phase_id: 'plan' });
+
+      const log = await readExecutionLog(projectRoot, { limit: 10 });
+      assert.equal(log.entries[0].prev_hash, after.entry_hash);
     } finally {
       rmSync(projectRoot, { recursive: true, force: true });
     }

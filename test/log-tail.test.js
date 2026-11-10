@@ -91,6 +91,29 @@ describe('Log tail', () => {
     }
   });
 
+  test('finds an entry from the head of a log larger than one scan window', async () => {
+    const projectRoot = makeProjectRoot();
+    try {
+      // > 64KB, so the tail-anchored scan has to widen its window to reach the first entry.
+      const atomIds = [];
+      for (let index = 0; index < 400; index += 1) {
+        atomIds.push(`ATOM-${index}-${'padding'.repeat(20)}`);
+      }
+      await seed(projectRoot, atomIds);
+      const all = await readEntriesFromOffset(projectRoot, 0, { limit: 1000 });
+      const size = await readExecutionLogSize(projectRoot);
+      assert.ok(size > 64 * 1024, `log is only ${size} bytes`);
+
+      const offset = await resolveEntryOffset(projectRoot, all.entries[0].entry_hash);
+      assert.equal(typeof offset, 'number');
+      const rest = await readEntriesFromOffset(projectRoot, offset, { limit: 1 });
+      assert.equal(rest.entries[0].atom_id, atomIds[1]);
+      assert.equal(await resolveEntryOffset(projectRoot, 'not-in-this-log'), null);
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
   test('maps an entry hash to the byte offset just past that entry', async () => {
     const projectRoot = makeProjectRoot();
     try {
