@@ -21,6 +21,13 @@ Thresholds (initial values, see evalid #97 for the calibration):
   flips the verdict to ``full`` -- the spec ritual exists precisely to catch
   drift there, so a small diff touching spec/workflow definitions must not
   skip it. An empty diff classifies ``lite``.
+* Untracked files count in ``--uncommitted`` mode only (evalid #109):
+  ``git diff`` ignores them, so a brand-new 500-line file used to read as
+  an empty diff. They are listed with ``git ls-files --others
+  --exclude-standard`` (the same call i6c/j4b/j6 already use), so
+  gitignored files stay excluded; binary files count as a touched file
+  with zero lines, like numstat. Committed mode measures base→HEAD by
+  definition and does not count stray untracked files.
 * Workflow-generated artifacts under ``specs/changes/<id>/`` do not count
   (slice 4, evalid #103): the workflow itself rewrites ``status.json``
   (+268 lines in the M4 demo) and writes proof artifacts (``tdd/``,
@@ -89,6 +96,51 @@ def _is_generated_change_artifact(path):
     if len(rest) == 1 and rest[0] in GENERATED_CHANGE_FILES:
         return True
     return bool(rest) and (rest[0] + "/") in GENERATED_CHANGE_DIRS
+
+
+def _count_file_lines(abspath):
+    """New-line count of a file on disk; binary files count 0 lines.
+
+    A non-empty file whose last byte is not a newline has one more line
+    than its newline count. Unreadable files (raced away between listing
+    and reading) count 0 lines but still count as a touched file.
+    """
+    try:
+        with open(abspath, "rb") as handle:
+            chunk = handle.read(8192)
+            if not chunk:
+                return 0
+            if b"\0" in chunk:
+                return 0
+            count = chunk.count(b"\n")
+            last = chunk[-1:]
+            while True:
+                chunk = handle.read(65536)
+                if not chunk:
+                    break
+                if b"\0" in chunk:
+                    return 0
+                count += chunk.count(b"\n")
+                last = chunk[-1:]
+            if last != b"\n":
+                count += 1
+            return count
+    except OSError:
+        return 0
+
+
+def _untracked_files(repo):
+    """Non-ignored untracked files (``git ls-files --others --exclude-standard``)."""
+    proc = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        cwd=repo, capture_output=True, text=True, timeout=30,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "git ls-files --others failed "
+            f"({proc.returncode}): {proc.stderr.strip()}"
+        )
+    return [path for path in proc.stdout.split("\0") if path]
 
 
 def _git(repo, *argv):
@@ -218,6 +270,18 @@ def classify_repo(repo, base="main", max_files=DEFAULT_MAX_FILES,
         for path, counts in stats.items()
         if not _is_generated_change_artifact(path)
     }
+    # Untracked files are invisible to `git diff` (evalid #109): a new
+    # 500-line file used to classify as an empty diff. Union them in
+    # --uncommitted mode only, where the change under review is the
+    # worktree itself; committed mode measures base→HEAD by definition.
+    untracked_new_lines = 0
+    if uncommitted:
+        for path in _untracked_files(repo):
+            if path in stats or _is_generated_change_artifact(path):
+                continue
+            lines = _count_file_lines(os.path.join(repo, path))
+            stats[path] = (lines, 0)
+            untracked_new_lines += lines
     files = sorted(stats)
     added = sum(a for a, _ in stats.values())
     removed = sum(r for _, r in stats.values())
@@ -234,7 +298,7 @@ def classify_repo(repo, base="main", max_files=DEFAULT_MAX_FILES,
         "max_lines": max_lines,
         "base": base_sha,
         "force_full": force_full,
-        "changed_new_lines": sum(len(lines) for lines in changed.values()),
+        "changed_new_lines": sum(len(lines) for lines in changed.values()) + untracked_new_lines,
         "source": "repo",
     }
 

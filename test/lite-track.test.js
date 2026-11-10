@@ -472,3 +472,97 @@ describe('lite_track generated change artifacts (M4 slice 4)', () => {
     }
   });
 });
+
+describe('lite_track untracked files (M4 follow-up, evalid #109)', () => {
+  test('untracked 400-line new file classifies full, not empty-diff lite', () => {
+    const dir = makeRepo();
+    try {
+      const big = Array.from({ length: 400 }, (_, i) => `added line ${i}`).join('\n') + '\n';
+      writeFileSync(join(dir, 'big.txt'), big);
+      const verdict = classify(dir, ['--uncommitted']);
+      assert.equal(verdict.track, 'full');
+      assert.equal(verdict.files, 1, 'the untracked file must count as a changed file');
+      assert.equal(verdict.total, 400);
+      assert.equal(verdict.changed_new_lines, 400);
+      assert.match(verdict.reason, /line/);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test('untracked small new file counts toward the lite budget', () => {
+    const dir = makeRepo();
+    try {
+      writeFileSync(join(dir, 'a.txt'), 'line1\nline2\n');
+      writeFileSync(join(dir, 'b.txt'), Array.from({ length: 10 }, (_, i) => `new ${i}`).join('\n') + '\n');
+      const verdict = classify(dir, ['--uncommitted']);
+      assert.equal(verdict.track, 'lite');
+      assert.equal(verdict.files, 2, 'tracked edit + untracked file');
+      assert.equal(verdict.total, 11);
+      assert.equal(verdict.changed_new_lines, 11);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test('untracked file under specs/ forces full', () => {
+    const dir = makeRepo();
+    try {
+      mkdirSync(join(dir, 'specs'), { recursive: true });
+      writeFileSync(join(dir, 'specs', 'notes.md'), '# notes\n');
+      const verdict = classify(dir, ['--uncommitted']);
+      assert.equal(verdict.track, 'full');
+      assert.deepEqual(verdict.force_full, ['specs/notes.md']);
+      assert.match(verdict.reason, /specs\//);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test('gitignored untracked file is ignored', () => {
+    const dir = makeRepo();
+    try {
+      // The .gitignore itself is a real change, so commit it first: only
+      // the ignored file must stay invisible.
+      writeFileSync(join(dir, '.gitignore'), 'ignored.log\n');
+      git(dir, 'add', '.gitignore');
+      git(dir, 'commit', '-qm', 'ignore logs');
+      const big = Array.from({ length: 400 }, (_, i) => `log ${i}`).join('\n') + '\n';
+      writeFileSync(join(dir, 'ignored.log'), big);
+      const verdict = classify(dir, ['--uncommitted']);
+      assert.equal(verdict.track, 'lite');
+      assert.equal(verdict.files, 0, 'gitignored files must not count');
+      assert.equal(verdict.total, 0);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test('untracked binary file counts as a touched file with zero lines', () => {
+    const dir = makeRepo();
+    try {
+      writeFileSync(join(dir, 'blob.bin'), Buffer.alloc(500, 0));
+      const verdict = classify(dir, ['--uncommitted']);
+      assert.equal(verdict.track, 'lite');
+      assert.equal(verdict.files, 1, 'a binary file is still a changed file');
+      assert.equal(verdict.total, 0);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test('committed mode does not count stray untracked files', () => {
+    const dir = makeRepo();
+    try {
+      commitOnBranch(dir, { 'a.txt': 'line1\nline2\n' });
+      const big = Array.from({ length: 400 }, (_, i) => `added line ${i}`).join('\n') + '\n';
+      writeFileSync(join(dir, 'big.txt'), big);
+      const verdict = classify(dir);
+      assert.equal(verdict.track, 'lite', 'committed mode measures base->HEAD only');
+      assert.equal(verdict.files, 1);
+      assert.equal(verdict.total, 1);
+    } finally {
+      cleanup(dir);
+    }
+  });
+});
