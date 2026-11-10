@@ -532,6 +532,10 @@ function renderDashboardHtml() {
         )).join('') || '<div class="meta">No pending gates</div>';
       }
       let activityEntries = [];
+      // Hashes already on screen. Seeded from the snapshot as well as from log events: an
+      // entry can arrive twice, once inside the snapshot and once as a stream event written
+      // between the snapshot read and the point where the stream started.
+      const seenHashes = new Set();
       function describeEntry(entry) {
         if (entry.kind === 'agent_event') {
           const detail = entry.text || entry.args_preview || entry.reason || '';
@@ -560,8 +564,28 @@ function renderDashboardHtml() {
             '<div class="meta">' + view.meta.filter(Boolean).join(' · ') + '</div></li>';
         }).join('') || '<li class="meta">No execution activity yet</li>';
       }
-      function renderActivity(entries) {
-        activityEntries = entries.slice(0, 20);
+      // A snapshot carries entries a log event may already have painted. Merging by entry_hash
+      // instead of replacing the list keeps anything that arrived while the snapshot was in
+      // flight (replacing it made those rows disappear again for up to one snapshot interval).
+      // Entries already on screen stay first: they are strictly newer than anything the snapshot
+      // adds, so this preserves file order without trusting timestamps.
+      function renderActivity(entries, options) {
+        const incoming = entries.slice(0, 20);
+        for (const entry of incoming) {
+          if (entry.entry_hash) seenHashes.add(entry.entry_hash);
+        }
+        if (options && options.merge) {
+          const merged = activityEntries.slice();
+          const seen = new Set(merged.map((entry) => entry.entry_hash).filter(Boolean));
+          for (const entry of incoming) {
+            if (entry.entry_hash && seen.has(entry.entry_hash)) continue;
+            if (entry.entry_hash) seen.add(entry.entry_hash);
+            merged.push(entry);
+          }
+          activityEntries = merged.slice(0, 20);
+        } else {
+          activityEntries = incoming;
+        }
         paintActivity();
       }
       function appendActivity(entry) {
@@ -642,12 +666,11 @@ function renderDashboardHtml() {
       });
       if (window.EventSource) {
         const events = new EventSource('/api/events');
-        const seenHashes = new Set();
         events.addEventListener('snapshot', (event) => {
           const payload = JSON.parse(event.data);
           renderSummary(payload.summary);
           renderGates(payload.pending_gates || []);
-          renderActivity(payload.execution_log?.entries || []);
+          renderActivity(payload.execution_log?.entries || [], { merge: true });
         });
         events.addEventListener('log', (event) => {
           const entry = JSON.parse(event.data);
