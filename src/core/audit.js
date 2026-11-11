@@ -33,7 +33,7 @@
  * 2 misuse, 3 no_claims (inconclusive, not a failure of the change).
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -195,6 +195,18 @@ export function parseClaimCounts(line) {
   }
   m = text.match(/(\d+)\s*(?:fail|failed|failures?|失败)/i);
   if (m) counts.failed = Number(m[1]);
+  // Label-first counts ("pass 8", "fail 0"): the node --test summary style
+  // real PRs use ("reports `pass 8`, `fail 0`"). Only fill fields the
+  // count-first patterns above did not already set, so "9 passed" keeps
+  // winning over a later "pass 8" on the same line.
+  if (counts.passed === undefined) {
+    m = text.match(/pass(?:ed)?\s+(\d+)/i);
+    if (m) counts.passed = Number(m[1]);
+  }
+  if (counts.failed === undefined) {
+    m = text.match(/fail(?:ed|ures?)?\s+(\d+)/i);
+    if (m) counts.failed = Number(m[1]);
+  }
   if (/all\s+pass(?:ing|es)?\b/i.test(text) || /全部通过/.test(text)) {
     if (counts.failed === undefined) counts.failed = 0;
   }
@@ -418,6 +430,74 @@ function splitCommand(command) {
   return parts;
 }
 
+/** Argv tokens that look like repo-relative file paths (not flags, not packages). */
+export function isPathLikeArg(token) {
+  const text = String(token || '');
+  return text.includes('/')
+    && !text.startsWith('-')
+    && !text.startsWith('/')
+    && !text.includes('=')
+    && !text.includes('://');
+}
+
+/**
+ * Find the subdirectory a claimed command must run in. Real PRs scope
+ * commands to a package ("`npm test` in `packages/lsp-daemon`",
+ * `node --test test/foo.test.ts` from `packages/tui/`), but the claim
+ * text rarely states the directory. When every path-like argv token is
+ * missing at the repo root yet all of them exist under exactly one
+ * subdirectory, replay from there; otherwise stay at the root (including
+ * when the paths resolve at the root, or when two subdirectories both
+ * fit). Never guesses: an ambiguous or unresolvable layout keeps root.
+ */
+export function resolveClaimCwd(workdir, argv) {
+  const tokens = (argv || [])
+    .filter(isPathLikeArg)
+    .map((token) => String(token).replace(/^\.\//, ''));
+  if (tokens.length === 0) return '';
+  if (tokens.every((token) => existsSync(join(workdir, token)))) return '';
+  const first = tokens[0];
+  const basename = first.split('/').pop();
+  const found = findFilesByBasename(workdir, basename);
+  const dirs = new Set();
+  for (const file of found) {
+    if (file !== first && !file.endsWith(`/${first}`)) continue;
+    const dir = file.slice(0, file.length - first.length).replace(/\/$/, '');
+    if (!dir) continue;
+    if (tokens.every((token) => existsSync(join(workdir, dir, token)))) dirs.add(dir);
+  }
+  return dirs.size === 1 ? [...dirs][0] : '';
+}
+
+const CLAIM_CWD_SKIP_DIRS = new Set(['node_modules', '.git']);
+
+/** Relative paths of files named `basename` under `root` (bounded walk). */
+export function findFilesByBasename(root, basename, maxDepth = 6, maxDirs = 3000) {
+  const results = [];
+  let visited = 0;
+  function walk(dir, depth, prefix) {
+    if (depth > maxDepth || visited >= maxDirs) return;
+    visited += 1;
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        if (CLAIM_CWD_SKIP_DIRS.has(entry.name)) continue;
+        walk(join(dir, entry.name), depth + 1, rel);
+      } else if (entry.name === basename) {
+        results.push(rel);
+      }
+    }
+  }
+  walk(root, 0, '');
+  return results;
+}
+
 function runShell(cwd, argv, timeoutMs) {
   const started = Date.now();
   // A replay must run in a clean test-runner context: when audit itself runs
@@ -565,11 +645,12 @@ export function runAudit(options = {}) {
     for (const claim of claims) {
       const argv = splitCommand(claim.command);
       if (argv.length === 0) {
-        claimResults.push({ ...claim, replay: null, match: false, note: 'empty command' });
+        claimResults.push({ ...claim, replay: null, match: false, note: 'empty command', cwd: '' });
         mismatch = mismatch || 'empty command';
         continue;
       }
-      const replay = runShell(workdir, argv, timeoutMs);
+      const claimCwd = resolveClaimCwd(workdir, argv);
+      const replay = runShell(claimCwd ? join(workdir, claimCwd) : workdir, argv, timeoutMs);
       const counts = parseReplayCounts(replay.output, claim.command);
       const expectedExit = claim.claimedExit ?? 0;
       let match = replay.exit === expectedExit && !replay.timedOut && !replay.spawnError;
@@ -589,7 +670,7 @@ export function runAudit(options = {}) {
       if (replay.timedOut) note = `replay timed out after ${timeoutMs}ms`;
       if (replay.spawnError) note = `could not run claimed command: ${replay.spawnError}`;
       if (!match && !note) note = `exit: claimed ${expectedExit}, replayed ${replay.exit}`;
-      claimResults.push({ ...claim, replay: { ...replay, counts }, match, note });
+      claimResults.push({ ...claim, replay: { ...replay, counts }, match, note, cwd: claimCwd });
       if (!match) mismatch = mismatch || note || 'claim mismatch';
     }
 
@@ -666,7 +747,7 @@ export function renderAuditReport(report) {
       claim.claimedPassed !== null ? `${claim.claimedPassed} passed` : null,
       claim.claimedFailed !== null ? `${claim.claimedFailed} failed` : null,
     ].filter(Boolean).join(', ') || 'no counts stated';
-    lines.push(`- ${claim.match ? '✓' : '✗'} ${claim.command} (claimed ${claimedText}; ${replayText})${claim.note ? ` — ${claim.note}` : ''}`);
+    lines.push(`- ${claim.match ? '✓' : '✗'} ${claim.command}${claim.cwd ? ` [cwd: ${claim.cwd}]` : ''} (claimed ${claimedText}; ${replayText})${claim.note ? ` — ${claim.note}` : ''}`);
   }
   for (const seal of report.seals || []) {
     lines.push(`- ${seal.ok ? '✓' : '✗'} seal ${seal.changeId}/${seal.phase}/${seal.attempt}: ${seal.verdict}`);

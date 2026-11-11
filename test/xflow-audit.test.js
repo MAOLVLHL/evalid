@@ -13,6 +13,7 @@ import {
   parseDiffFiles,
   parseReplayCounts,
   renderAuditReport,
+  resolveClaimCwd,
   runAudit,
 } from '../src/core/audit.js';
 
@@ -120,6 +121,23 @@ describe('extractClaims', () => {
     assert.deepEqual(extractClaims('Just a refactor, no tests mentioned.'), []);
   });
 
+  test('parses label-first counts: node --test summary style (M2 slice 2, #116)', () => {
+    // senpi PRs report "reports `pass 8`, `fail 0`" — the count-first
+    // patterns never fired, so the RED claim (pass 0, fail 4) was silently
+    // dropped and audited as exit-only.
+    assert.deepEqual(parseClaimCounts('reports `pass 8`, `fail 0`'), { passed: 8, failed: 0 });
+    assert.deepEqual(parseClaimCounts('reports `pass 0`, `fail 4`, and `AssertionError`'), { passed: 0, failed: 4 });
+    const claims = extractClaims('RED: `node --test test/a.test.js` — reports `pass 0`, `fail 4`.');
+    assert.equal(claims.length, 1);
+    assert.equal(claims[0].claimedPassed, 0);
+    assert.equal(claims[0].claimedFailed, 4);
+  });
+
+  test('count-first counts still win over label-first on the same line', () => {
+    assert.deepEqual(parseClaimCounts('9 passed, 0 failed'), { passed: 9, failed: 0 });
+    assert.deepEqual(parseClaimCounts('Full `npm test` passes (exit 0, run twice post-change)'), {});
+  });
+
   test('extracts python -m unittest claims: module, discover, and python3 -v forms', () => {
     // Regression: swrm M2 attempt 1 (run 20261109-231900-3c6b2a) genuinely
     // passed 9 unittest tests but audit reported no_claims — the runner
@@ -139,6 +157,60 @@ describe('extractClaims', () => {
     assert.equal(claims[0].command, 'python -m unittest tests.test_foo');
     assert.equal(claims[1].command, 'python -m unittest discover');
     assert.equal(claims[2].command, 'python3 -m unittest -v tests.test_bar');
+  });
+});
+
+describe('resolveClaimCwd (M2 slice 2, #116)', () => {
+  function makeTree(files) {
+    const root = mkdtempSync(join(tmpdir(), 'evalid-audit-cwd-'));
+    for (const file of files) {
+      mkdirSync(join(root, file.split('/').slice(0, -1).join('/')), { recursive: true });
+      writeFileSync(join(root, file), 'x');
+    }
+    return root;
+  }
+
+  test('stays at the root when the paths resolve there', () => {
+    const root = makeTree(['test/a.test.js']);
+    try {
+      assert.equal(resolveClaimCwd(root, ['node', '--test', 'test/a.test.js']), '');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('returns the unique subdirectory when paths exist only there', () => {
+    const root = makeTree(['packages/tui/test/stdin-buffer.test.ts', 'packages/tui/test/setup.mjs']);
+    try {
+      // senpi#2606 shape: two path tokens, both under packages/tui.
+      assert.equal(
+        resolveClaimCwd(root, ['node', '--test', '--import', 'tsx', '--import', './test/setup.mjs', 'test/stdin-buffer.test.ts']),
+        'packages/tui',
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('stays at the root when two subdirectories both fit', () => {
+    const root = makeTree(['pkg-a/test/a.test.js', 'pkg-b/test/a.test.js']);
+    try {
+      assert.equal(resolveClaimCwd(root, ['node', '--test', 'test/a.test.js']), '');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('stays at the root when a path exists nowhere, or there are no path tokens', () => {
+    const root = makeTree(['packages/tui/test/stdin-buffer.test.ts']);
+    try {
+      assert.equal(resolveClaimCwd(root, ['node', '--test', 'test/missing.test.js']), '');
+      assert.equal(resolveClaimCwd(root, ['npm', 'test']), '');
+      // One token under pkg, the other nowhere: no single dir fits.
+      assert.equal(resolveClaimCwd(root, ['node', '--test', 'test/stdin-buffer.test.ts', 'test/a.test.js']), '');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
@@ -253,6 +325,34 @@ function makeFixtureRepo() {
   return { repo, git };
 }
 
+function makeSubdirFixtureRepo() {
+  // Like makeFixtureRepo, but the tests live in a package subdirectory:
+  // the claimed command's path is relative to packages/pkg, not the root
+  // (senpi#2606 shape).
+  const repo = mkdtempSync(join(tmpdir(), 'evalid-audit-fixture-'));
+  const git = (args) => {
+    const result = spawnSync('git', args, { cwd: repo, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    return result;
+  };
+  git(['init', '-q']);
+  git(['config', 'user.email', 'audit-fixture@example.test']);
+  git(['config', 'user.name', 'audit-fixture']);
+  writeFileSync(join(repo, 'package.json'), JSON.stringify({ name: 'fixture', type: 'module' }, null, 2));
+  mkdirSync(join(repo, 'packages', 'pkg', 'test'), { recursive: true });
+  writeFileSync(join(repo, 'packages', 'pkg', 'src.js'), 'export const add = (a, b) => a + b;\n');
+  writeFileSync(join(repo, 'packages', 'pkg', 'test', 'a.test.js'), [
+    "import { test } from 'node:test';",
+    "import assert from 'node:assert/strict';",
+    "import { add } from '../src.js';",
+    "test('adds', () => assert.equal(add(1, 2), 3));",
+    "test('adds again', () => assert.equal(add(2, 2), 4));",
+    '',
+  ].join('\n'));
+  git(['add', '.']);
+  git(['commit', '-qm', 'base']);
+  return { repo, git };
+}
 function makeDiff(repo, mutate) {
   const { git } = { git: (args) => spawnSync('git', args, { cwd: repo, encoding: 'utf8' }) };
   mutate();
@@ -317,6 +417,60 @@ describe('runAudit end-to-end on a fixture repo', () => {
       // change the verdict.
       assert.equal(report.i6d.applicable, false);
       assert.equal(report.i6d.reason, 'plugin_not_present');
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test('verified for label-first counts, and a tampered count mismatches at the exact break point (M2 slice 2, #116)', () => {
+    const { repo } = makeFixtureRepo();
+    try {
+      const base = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim();
+      const diff = makeDiff(repo, () => {
+        writeFileSync(join(repo, 'src.js'), 'export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\n');
+      });
+      const honest = runAudit({
+        repoDir: repo,
+        diffText: diff,
+        baseRef: base,
+        claimsText: 'Tests: `node --test test/a.test.js` — reports `pass 2`, `fail 0`.',
+      });
+      assert.equal(honest.verdict, 'verified', JSON.stringify(honest, null, 2));
+      assert.equal(honest.claims[0].claimedPassed, 2);
+      assert.equal(honest.claims[0].replay.counts.passed, 2);
+      const tampered = runAudit({
+        repoDir: repo,
+        diffText: diff,
+        baseRef: base,
+        claimsText: 'Tests: `node --test test/a.test.js` — reports `pass 3`, `fail 0`.',
+      });
+      assert.equal(tampered.verdict, 'mismatch', JSON.stringify(tampered, null, 2));
+      assert.equal(tampered.claims[0].match, false);
+      assert.equal(tampered.claims[0].note, 'passed count: claimed 3, replayed 2');
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test('verified when the claimed command runs in a package subdirectory (M2 slice 2, #116)', () => {
+    // senpi#2606 regression: the claim's path only exists under
+    // packages/tui; replaying at the root used to fail with
+    // "Could not find 'test/stdin-buffer.test.ts'" (false mismatch).
+    const { repo } = makeSubdirFixtureRepo();
+    try {
+      const base = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim();
+      const diff = makeDiff(repo, () => {
+        writeFileSync(join(repo, 'packages', 'pkg', 'src.js'), 'export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\n');
+      });
+      const report = runAudit({
+        repoDir: repo,
+        diffText: diff,
+        baseRef: base,
+        claimsText: 'Tests: `node --test test/a.test.js` — 2 tests, all pass.',
+      });
+      assert.equal(report.verdict, 'verified', JSON.stringify(report, null, 2));
+      assert.equal(report.claims[0].cwd, 'packages/pkg');
+      assert.equal(report.claims[0].replay.counts.passed, 2);
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }
