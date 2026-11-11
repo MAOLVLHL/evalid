@@ -41,6 +41,13 @@
  * the audit level), while a real inconsistency names the exact
  * differing files. The judgement only classifies — it never flips a
  * verdict by itself.
+ *
+ * Slice 3 (M6, issue #135) fixes two slice-1 precision gaps in that
+ * judgement: optional packages a successful install legitimately
+ * skips (platform packages, pruned optional transitives) no longer
+ * count as inconsistencies, bun.lock is parsed as a lockfile
+ * authority, and a repo with no trustworthy lockfile reports
+ * cannot-determine instead of a hollow consistent.
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -470,15 +477,60 @@ export function isDependencyFile(path) {
 }
 
 /**
- * Declared dependency versions from a package-lock.json (npm v7+
- * `packages` map, or the legacy `dependencies` map). Returns a Map of
- * name -> version, or null when there is no (parseable) lockfile.
- * bun.lockb is binary and yarn/pnpm lockfiles use their own format, so
- * they are not parsed here — their presence still marks the deps as
- * changed (see isDependencyFile), but version-level comparison needs a
- * package-lock.json.
+ * Minimal JSONC reader: `//` and `/* *\/` comments plus trailing commas,
+ * all outside strings. Integrity hashes contain `//` inside strings
+ * (sha512-...), so comment detection must be string-aware — a naive
+ * regex strip would corrupt the file.
  */
-export function readLockfileVersions(dir) {
+export function parseJsonc(text) {
+  let out = '';
+  let i = 0;
+  const n = String(text).length;
+  let inString = false;
+  let escaped = false;
+  while (i < n) {
+    const ch = text[i];
+    if (inString) {
+      out += ch;
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      i += 1;
+      continue;
+    }
+    if (ch === '"') { inString = true; out += ch; i += 1; continue; }
+    if (ch === '/' && text[i + 1] === '/') { while (i < n && text[i] !== '\n') i += 1; continue; }
+    if (ch === '/' && text[i + 1] === '*') {
+      i += 2;
+      while (i < n && !(text[i] === '*' && text[i + 1] === '/')) i += 1;
+      i = Math.min(n, i + 2);
+      continue;
+    }
+    if (ch === ',') {
+      // Drop a trailing comma: `,` followed only by whitespace then `}`/`]`.
+      let j = i + 1;
+      while (j < n && /\s/.test(text[j])) j += 1;
+      if (text[j] === '}' || text[j] === ']') { i += 1; continue; }
+      out += ch; i += 1; continue;
+    }
+    out += ch; i += 1;
+  }
+  return JSON.parse(out);
+}
+
+/**
+ * Declared dependency entries from a package-lock.json (npm v7+
+ * `packages` map, or the legacy `dependencies` map). Returns a Map of
+ * name -> { version, optional, cpu, os, libc }, or null when there is
+ * no (parseable) lockfile. `optional` is the lockfile's own flag: npm
+ * sets it on packages reachable only through optionalDependencies
+ * (platform packages and their pruned transitives). bun.lockb is
+ * binary and yarn/pnpm lockfiles use their own format, so they are
+ * not parsed here — their presence still marks the deps as changed
+ * (see isDependencyFile), but version-level comparison needs a
+ * package-lock.json or a bun.lock (see readBunLockEntries).
+ */
+export function readPackageLockEntries(dir) {
   const lockPath = join(dir, 'package-lock.json');
   if (!existsSync(lockPath)) return null;
   let lock;
@@ -487,23 +539,158 @@ export function readLockfileVersions(dir) {
   } catch {
     return null;
   }
-  const versions = new Map();
+  const toEntry = (raw) => {
+    if (!raw || typeof raw !== 'object' || typeof raw.version !== 'string') return null;
+    return {
+      version: raw.version,
+      optional: raw.optional === true,
+      cpu: raw.cpu ?? null,
+      os: raw.os ?? null,
+      libc: raw.libc ?? null,
+    };
+  };
+  const entries = new Map();
   const packages = lock && lock.packages;
   if (packages && typeof packages === 'object') {
-    for (const [key, entry] of Object.entries(packages)) {
+    for (const [key, raw] of Object.entries(packages)) {
       if (!key.startsWith('node_modules/')) continue;
       const rest = key.slice('node_modules/'.length);
       // Skip nested installs (node_modules/a/node_modules/b): only the
       // top-level tree is the snapshot under judgement.
       if (rest.includes('node_modules/')) continue;
-      if (entry && typeof entry.version === 'string') versions.set(rest, entry.version);
+      const entry = toEntry(raw);
+      if (entry) entries.set(rest, entry);
     }
   } else if (lock && lock.dependencies && typeof lock.dependencies === 'object') {
-    for (const [name, entry] of Object.entries(lock.dependencies)) {
-      if (entry && typeof entry.version === 'string') versions.set(name, entry.version);
+    for (const [name, raw] of Object.entries(lock.dependencies)) {
+      const entry = toEntry(raw);
+      if (entry) entries.set(name, entry);
     }
   }
+  return entries;
+}
+
+/**
+ * Declared dependency versions from a package-lock.json (npm v7+
+ * `packages` map, or the legacy `dependencies` map). Returns a Map of
+ * name -> version, or null when there is no (parseable) lockfile.
+ * (Package-lock only; for bun.lock see readBunLockEntries, for the
+ * combined authority see readLockfileEntries.)
+ */
+export function readLockfileVersions(dir) {
+  const entries = readPackageLockEntries(dir);
+  if (entries === null) return null;
+  const versions = new Map();
+  for (const [name, entry] of entries) versions.set(name, entry.version);
   return versions;
+}
+
+/**
+ * Declared dependency entries from a bun.lock (text JSONC, lockfile
+ * version 1). Returns a Map of name -> { version, optional, cpu, os,
+ * libc: null }, or null when there is no (parseable) bun.lock.
+ *
+ * Format (verified against code-yeongyu/oh-my-openagent#8014, merge
+ * 51ddf958): top-level `packages` maps a name to
+ * `[name@version, resolved, meta, integrity]`; `meta` carries `os` /
+ * `cpu` for platform packages and `optionalDependencies` for their
+ * parents. A package counts as optional when any workspace or any
+ * package entry lists it under `optionalDependencies` — that is how
+ * bun records platform packages (e.g. @esbuild/win32-x64 is an
+ * optionalDependency of esbuild, not of the root workspace).
+ */
+export function readBunLockEntries(dir) {
+  const lockPath = join(dir, 'bun.lock');
+  if (!existsSync(lockPath)) return null;
+  let lock;
+  try {
+    lock = parseJsonc(readFileSync(lockPath, 'utf8'));
+  } catch {
+    return null;
+  }
+  const packages = lock && lock.packages;
+  if (!packages || typeof packages !== 'object') return null;
+  const optionalNames = new Set();
+  const collectOptional = (obj) => {
+    if (obj && typeof obj === 'object' && obj.optionalDependencies && typeof obj.optionalDependencies === 'object') {
+      for (const name of Object.keys(obj.optionalDependencies)) optionalNames.add(name);
+    }
+  };
+  const workspaces = lock.workspaces;
+  if (workspaces && typeof workspaces === 'object') {
+    for (const ws of Object.values(workspaces)) collectOptional(ws);
+  }
+  const metas = new Map();
+  for (const [name, value] of Object.entries(packages)) {
+    if (Array.isArray(value) && value.length >= 3 && value[2] && typeof value[2] === 'object') {
+      metas.set(name, value[2]);
+      collectOptional(value[2]);
+    }
+  }
+  const entries = new Map();
+  for (const [name, value] of Object.entries(packages)) {
+    if (!Array.isArray(value) || typeof value[0] !== 'string') continue;
+    // value[0] is "name@version" (scoped: "@scope/name@version").
+    const at = value[0].lastIndexOf('@');
+    if (at <= 0) continue;
+    const version = value[0].slice(at + 1);
+    if (!version) continue;
+    const meta = metas.get(name) || {};
+    entries.set(name, {
+      version,
+      optional: optionalNames.has(name),
+      cpu: meta.cpu ?? null,
+      os: meta.os ?? null,
+      libc: meta.libc ?? null,
+    });
+  }
+  return entries;
+}
+
+/**
+ * Declared dependency entries from the audited lockfile:
+ * package-lock.json first, else bun.lock, else null. This is the
+ * snapshot authority used by checkNodeModulesSnapshot.
+ */
+export function readLockfileEntries(dir) {
+  return readPackageLockEntries(dir) ?? readBunLockEntries(dir);
+}
+
+/**
+ * Bun's install layout: packages live in `node_modules/.bun/` as
+ * content-addressed dirs (`name@version`, scoped names with `/`
+ * written as `+`, plus an optional `+<hash>` disambiguator), and only
+ * a subset is symlinked to the top level. A top-level-only scan
+ * therefore undercounts a bun-installed tree (omo#8014: 66 top-level
+ * entries vs 661 cache dirs). Returns a Map of name -> Set of
+ * versions found in the cache, or an empty Map when there is no
+ * `.bun` dir (npm trees).
+ */
+export function listBunCachePackages(nodeModulesDir) {
+  const found = new Map();
+  const cacheDir = join(nodeModulesDir, '.bun');
+  let entries;
+  try {
+    entries = readdirSync(cacheDir, { withFileTypes: true });
+  } catch {
+    return found;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const raw = entry.name;
+    const at = raw.lastIndexOf('@');
+    if (at <= 0) continue;
+    // The version part may carry a `+<hash>` disambiguator (or semver
+    // build metadata); the version is the part before the first `+`.
+    const version = raw.slice(at + 1).split('+')[0];
+    if (!version) continue;
+    // Scoped names are written with `+` for `/` (`@ai-sdk+provider`
+    // is `@ai-sdk/provider`); unscoped names contain no `+`.
+    const name = raw.startsWith('@') ? raw.slice(0, at).replace('+', '/') : raw.slice(0, at);
+    if (!found.has(name)) found.set(name, new Set());
+    found.get(name).add(version);
+  }
+  return found;
 }
 
 /** Top-level installed packages under a node_modules dir: name -> { version }. */
@@ -584,10 +771,12 @@ export function compareNodeModulesTrees(replayDir, referenceDir, options = {}) {
  *   workdir   — the replay tree (scratch clone, deps installed or not)
  *   sourceDir — the repo the claim was produced against (its installed
  *               tree is the claim-time snapshot), or null
- *   options   — { diffFiles, lockfileVersions } (lockfileVersions may
- *               be passed in: runAudit captures it before the install
- *               step, so a lockfile npm generates cannot masquerade as
- *               the audited one)
+ *   options   — { diffFiles, lockfileVersions, lockfileEntries,
+ *               replayCopiedFromSource } (lockfileEntries may be passed
+ *               in: runAudit captures it before the install step, so a
+ *               lockfile npm generates cannot masquerade as the
+ *               audited one; lockfileVersions is the legacy shape,
+ *               Map name -> version string, with no optional metadata)
  *
  * Statuses:
  *   no_package_json                  — nothing to install, nothing to judge
@@ -597,13 +786,26 @@ export function compareNodeModulesTrees(replayDir, referenceDir, options = {}) {
  *   deps_changed_missing_snapshot    — no node_modules and the diff
  *     changes dependencies: cannot judge (consistent: null)
  *   consistent / inconsistent       — the installed tree matches, or
- *     differs from, the lockfile (and, with no lockfile, the source
- *     snapshot); differences name the exact files. When a lockfile is
- *     present it is the authority: a stale source tree does not make a
- *     lockfile-exact replay "inconsistent".
- *   no_snapshot_to_compare          — a tree is installed but there is
- *     no lockfile and no source snapshot to judge it against
- *     (consistent: null)
+ *     differs from, the lockfile. Differences name the exact files.
+ *     A lockfile entry flagged `optional` that is missing from the
+ *     replay tree is NOT a difference (M6 slice 3, #135): a
+ *     successful install legitimately skips optional packages that do
+ *     not apply to this platform (os/cpu/libc mismatch) or whose
+ *     optional parent was skipped (pruned transitives). The
+ *     lockfile's own `optional` flag is the authority; such entries
+ *     are counted in `optionalExempted` / `exemptedPackages`
+ *     instead. A version drift on an installed optional package is
+ *     still a real difference. When a lockfile is present it is the
+ *     authority: a stale source tree does not make a lockfile-exact
+ *     replay "inconsistent".
+ *   cannot-determine                 — a tree is installed but there
+ *     is no trustworthy lockfile (no package-lock.json and no
+ *     parseable bun.lock) to judge it against (consistent: null).
+ *     The old replay-vs-source-tree comparison is gone: it
+ *     degenerated into self-comparison whenever the replay tree was
+ *     copied from the source tree (omo#8014: hollow "consistent", 0
+ *     differences), and a stale source tree makes it untrustworthy
+ *     even when the replay tree was installed fresh (M2 G4).
  *
  * This function only classifies; it never flips an audit verdict by
  * itself. runAudit renders the differences and annotates a failing
@@ -611,47 +813,75 @@ export function compareNodeModulesTrees(replayDir, referenceDir, options = {}) {
  * of silently blamed on the change.
  */
 export function checkNodeModulesSnapshot(workdir, sourceDir, options = {}) {
-  const { diffFiles = [], lockfileVersions = undefined } = options;
+  const { diffFiles = [], lockfileVersions = undefined, lockfileEntries = undefined, replayCopiedFromSource = false } = options;
   const depsChanged = (diffFiles || []).some(isDependencyFile);
   if (!existsSync(join(workdir, 'package.json'))) {
-    return { status: 'no_package_json', consistent: null, depsChanged, differences: [], replayPresent: false, sourcePresent: false };
+    return { status: 'no_package_json', consistent: null, depsChanged, differences: [], replayPresent: false, sourcePresent: false, optionalExempted: 0, exemptedPackages: [] };
   }
   const replayDir = join(workdir, 'node_modules');
   const replayPresent = existsSync(replayDir);
   const sourceResolved = sourceDir ? resolve(sourceDir) : null;
   const sourcePresent = !!sourceResolved && existsSync(join(sourceResolved, 'node_modules'));
-  const expected = lockfileVersions !== undefined ? lockfileVersions : readLockfileVersions(workdir);
+  // Lockfile authority: explicit entries first, then the legacy
+  // version-only map, then read from the workdir (package-lock.json,
+  // else bun.lock). A zero-entry map is a real lockfile (zero declared
+  // deps), not an absent one — only null means "no lockfile".
+  let expected = null;
+  if (lockfileEntries !== undefined) expected = lockfileEntries;
+  else if (lockfileVersions !== undefined) expected = lockfileVersions;
+  else expected = readLockfileEntries(workdir);
   if (!replayPresent) {
     if (expected && expected.size === 0) {
       // Zero declared dependencies: `npm ci` installs nothing and
       // creates no node_modules dir at all (verified 2026-11-11) — the
       // absent tree IS the expected tree, not a missing snapshot.
-      return { status: 'consistent', consistent: true, depsChanged, differences: [], replayPresent, sourcePresent };
+      return { status: 'consistent', consistent: true, depsChanged, differences: [], replayPresent, sourcePresent, optionalExempted: 0, exemptedPackages: [] };
     }
     if (!depsChanged) {
-      return { status: 'deps_unchanged_missing_snapshot', consistent: true, depsChanged, differences: [], replayPresent, sourcePresent };
+      return { status: 'deps_unchanged_missing_snapshot', consistent: true, depsChanged, differences: [], replayPresent, sourcePresent, optionalExempted: 0, exemptedPackages: [] };
     }
-    return { status: 'deps_changed_missing_snapshot', consistent: null, depsChanged, differences: ['node_modules: missing in replay tree (dependencies changed in diff)'], replayPresent, sourcePresent };
+    return { status: 'deps_changed_missing_snapshot', consistent: null, depsChanged, differences: ['node_modules: missing in replay tree (dependencies changed in diff)'], replayPresent, sourcePresent, optionalExempted: 0, exemptedPackages: [] };
   }
   const differences = [];
+  const exemptedPackages = [];
   if (expected) {
     const installed = listInstalledPackages(replayDir);
-    for (const [name, version] of expected) {
+    // Bun-installed trees keep most packages in node_modules/.bun
+    // (see listBunCachePackages); a package present there at the
+    // lockfile version counts as installed.
+    const bunCache = listBunCachePackages(replayDir);
+    for (const [name, entry] of expected) {
+      const version = typeof entry === 'string' ? entry : entry?.version;
+      const optional = entry && typeof entry === 'object' && entry.optional === true;
       const got = installed.get(name);
       if (!got) {
+        // M6 slice 3 (#135): a missing optional entry is a legitimate
+        // installer skip, never evidence against the change (see the
+        // status list above). Verified on senpi#2606 (92/92) and
+        // senpi#4801 (162/162): every recorded difference was an
+        // optional entry — platform packages (os/cpu/libc mismatch on
+        // linux-x64/glibc) plus pruned optional transitives
+        // (buildcheck/cpu-features/nan, @emnapi/*).
+        if (optional) { exemptedPackages.push(name); continue; }
+        const cached = bunCache.get(name);
+        if (cached && cached.has(version)) continue;
+        if (cached && cached.size > 0) {
+          differences.push(`node_modules/${name}/package.json: version ${[...cached].sort().join(', ')} (bun .bun store) vs ${version} (lockfile)`);
+          continue;
+        }
         differences.push(`node_modules/${name}: missing in replay tree (expected ${version})`);
-      } else if (got.version !== null && got.version !== version) {
+      } else if (got.version !== null && version !== undefined && got.version !== version) {
         differences.push(`node_modules/${name}/package.json: version ${got.version} (replay) vs ${version} (lockfile)`);
       }
     }
-  } else if (!depsChanged && sourcePresent) {
-    const cmp = compareNodeModulesTrees(replayDir, join(sourceResolved, 'node_modules'));
-    differences.push(...cmp.differences);
   } else {
-    return { status: 'no_snapshot_to_compare', consistent: null, depsChanged, differences: [], replayPresent, sourcePresent };
+    const reason = replayCopiedFromSource
+      ? 'node_modules: replay tree was copied from the source tree and no lockfile (package-lock.json or bun.lock) is available to judge it against (cannot-determine)'
+      : 'node_modules: no lockfile (package-lock.json or bun.lock) available to judge the installed tree against (cannot-determine)';
+    return { status: 'cannot-determine', consistent: null, depsChanged, differences: [reason], replayPresent, sourcePresent, optionalExempted: 0, exemptedPackages: [] };
   }
   const consistent = differences.length === 0;
-  return { status: consistent ? 'consistent' : 'inconsistent', consistent, depsChanged, differences, replayPresent, sourcePresent };
+  return { status: consistent ? 'consistent' : 'inconsistent', consistent, depsChanged, differences, replayPresent, sourcePresent, optionalExempted: exemptedPackages.length, exemptedPackages: exemptedPackages.slice(0, 50) };
 }
 
 function splitCommand(command) {
@@ -862,8 +1092,11 @@ export function runAudit(options = {}) {
     // Capture the audited lockfile before the install step: `npm
     // install` (no-lockfile repos) writes a fresh package-lock.json
     // into the scratch clone, which must not masquerade as the audited
-    // one when the snapshot is judged (M6 slice 1, #132).
-    const lockfileVersions = readLockfileVersions(workdir);
+    // one when the snapshot is judged (M6 slice 1, #132). Entries
+    // carry the lockfile's optional/cpu/os metadata (M6 slice 3,
+    // #135); bun.lock is accepted as an authority alongside
+    // package-lock.json.
+    const lockfileEntries = readLockfileEntries(workdir);
 
     // Replay setup: a fresh clone has no node_modules, so a claimed command
     // that imports a dependency would fail for environmental reasons, not
@@ -894,7 +1127,15 @@ export function runAudit(options = {}) {
     // against the audited lockfile / source snapshot. A missing snapshot
     // with unchanged dependencies is an environment gap, not a mismatch;
     // a real inconsistency names the exact differing files.
-    const nodeModules = checkNodeModulesSnapshot(workdir, resolve(repoDir), { diffFiles: diff.files, lockfileVersions });
+    // M6 slice 3 (#135): when the replay tree was copied from the
+    // source tree there is no independent tree to compare against —
+    // say so (cannot-determine) instead of reporting a hollow
+    // consistent.
+    const nodeModules = checkNodeModulesSnapshot(workdir, resolve(repoDir), {
+      diffFiles: diff.files,
+      lockfileEntries,
+      replayCopiedFromSource: setup.deps === 'copied from source repo node_modules',
+    });
     if (setup.error) {
       return { ok: false, verdict: 'unverifiable', error: `replay setup failed (${setup.error})`, claims, diff, setup, nodeModules, exitCode: 1 };
     }
@@ -1001,7 +1242,8 @@ export function renderAuditReport(report) {
   if (report.setup?.deps && report.setup.deps !== 'none') lines.push(`replay deps: ${report.setup.deps}`);
   if (report.nodeModules) {
     const nm = report.nodeModules;
-    lines.push(`node_modules snapshot: ${nm.status}${nm.depsChanged ? ' (dependencies changed in diff)' : ''}`);
+    const exempted = nm.optionalExempted ? ` (${nm.optionalExempted} optional package${nm.optionalExempted === 1 ? '' : 's'} exempted)` : '';
+    lines.push(`node_modules snapshot: ${nm.status}${nm.depsChanged ? ' (dependencies changed in diff)' : ''}${exempted}`);
     for (const d of nm.differences || []) lines.push(`  snapshot diff: ${d}`);
   }
   if (report.files) {

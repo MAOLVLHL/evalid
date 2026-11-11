@@ -13,10 +13,14 @@ import {
   isJavaScriptTestFile,
   isPythonTestFile,
   isTestCommand,
+  listBunCachePackages,
   parseAuditTarget,
   parseClaimCounts,
   parseDiffFiles,
+  parseJsonc,
   parseReplayCounts,
+  readBunLockEntries,
+  readLockfileEntries,
   readLockfileVersions,
   renderAuditReport,
   resolveClaimCwd,
@@ -366,7 +370,11 @@ describe('node_modules snapshot consistency (M6 slice 1, #132)', () => {
 
   function lockfile(versions) {
     const packages = { '': { name: 'fixture', version: '1.0.0' } };
-    for (const [name, version] of Object.entries(versions)) packages[`node_modules/${name}`] = { version };
+    for (const [name, spec] of Object.entries(versions)) {
+      // A plain version string, or a full lockfile entry
+      // ({ version, optional, cpu, os, libc }).
+      packages[`node_modules/${name}`] = typeof spec === 'string' ? { version: spec } : spec;
+    }
     return { name: 'fixture', lockfileVersion: 3, packages };
   }
 
@@ -504,24 +512,249 @@ describe('node_modules snapshot consistency (M6 slice 1, #132)', () => {
     }
   });
 
-  test('replay tree vs source snapshot drift names the exact file (deps unchanged)', () => {
-    // No lockfile: the source repo's installed tree is the reference.
-    // A version both trees disagree on is a real inconsistency.
+  test('no lockfile + installed tree reports cannot-determine, never hollow consistent (M6 slice 3, #135)', () => {
+    // omo#8014 (M6 slice 2): with no package-lock.json the judgement
+    // degenerated into replay-vs-source self-comparison and reported a
+    // hollow "consistent" (0 differences). Without a trustworthy
+    // lockfile there is no reference to judge against — say so
+    // explicitly, whether or not the tree was copied from the source.
     const workdir = makeTree({
       'package.json': { name: 'fixture' },
       'node_modules/js-yaml/package.json': { name: 'js-yaml', version: '4.1.0' },
     });
     const source = makeTree({
-      'node_modules/js-yaml/package.json': { name: 'js-yaml', version: '4.1.1' },
+      'node_modules/js-yaml/package.json': { name: 'js-yaml', version: '4.1.0' },
     });
     try {
-      const check = checkNodeModulesSnapshot(workdir, source, { diffFiles: ['src/index.js'] });
-      assert.equal(check.status, 'inconsistent');
-      assert.deepEqual(check.differences, [
-        'node_modules/js-yaml/package.json: version 4.1.0 (replay) vs 4.1.1 (reference)',
-      ]);
+      const copied = checkNodeModulesSnapshot(workdir, source, { diffFiles: ['src/index.js'], replayCopiedFromSource: true });
+      assert.equal(copied.status, 'cannot-determine');
+      assert.equal(copied.consistent, null);
+      assert.match(copied.differences[0], /copied from the source tree/);
+      assert.match(copied.differences[0], /cannot-determine/);
+      const installed = checkNodeModulesSnapshot(workdir, source, { diffFiles: ['src/index.js'] });
+      assert.equal(installed.status, 'cannot-determine');
+      assert.equal(installed.consistent, null);
+      assert.match(installed.differences[0], /no lockfile/);
     } finally {
       cleanup(workdir, source);
+    }
+  });
+
+  test('optional packages missing from the replay tree are exempt, not inconsistent (M6 slice 3, #135)', () => {
+    // senpi#2606 (92 diffs) / senpi#4801 (162 diffs): every recorded
+    // difference was an optional lockfile entry — platform packages
+    // (os/cpu/libc mismatch on linux-x64/glibc) plus pruned optional
+    // transitives (buildcheck/cpu-features/nan, @emnapi/*). A
+    // successful install legitimately skips them; the lockfile's own
+    // `optional` flag is the authority.
+    const workdir = makeTree({
+      'package.json': { name: 'fixture' },
+      'package-lock.json': lockfile({
+        'js-yaml': '4.1.0',
+        '@scope/darwin-pkg': { version: '1.0.0', optional: true, cpu: ['arm64'], os: ['darwin'] },
+        '@scope/musl-pkg': { version: '1.0.0', optional: true, cpu: ['x64'], os: ['linux'], libc: ['musl'] },
+        'pruned-transitive': { version: '2.0.0', optional: true },
+      }),
+      'node_modules/js-yaml/package.json': { name: 'js-yaml', version: '4.1.0' },
+    });
+    try {
+      const check = checkNodeModulesSnapshot(workdir, null, { diffFiles: ['src/index.js'] });
+      assert.equal(check.status, 'consistent');
+      assert.equal(check.consistent, true);
+      assert.deepEqual(check.differences, []);
+      assert.equal(check.optionalExempted, 3);
+      assert.deepEqual([...check.exemptedPackages].sort(), ['@scope/darwin-pkg', '@scope/musl-pkg', 'pruned-transitive']);
+    } finally {
+      cleanup(workdir);
+    }
+  });
+
+  test('a missing non-optional package is still inconsistent', () => {
+    const workdir = makeTree({
+      'package.json': { name: 'fixture' },
+      'package-lock.json': lockfile({
+        'js-yaml': '4.1.0',
+        'required-pkg': '1.0.0',
+        '@scope/darwin-pkg': { version: '1.0.0', optional: true, cpu: ['arm64'], os: ['darwin'] },
+      }),
+      'node_modules/js-yaml/package.json': { name: 'js-yaml', version: '4.1.0' },
+    });
+    try {
+      const check = checkNodeModulesSnapshot(workdir, null, { diffFiles: ['src/index.js'] });
+      assert.equal(check.status, 'inconsistent');
+      assert.equal(check.consistent, false);
+      assert.deepEqual(check.differences, [
+        'node_modules/required-pkg: missing in replay tree (expected 1.0.0)',
+      ]);
+      assert.equal(check.optionalExempted, 1);
+    } finally {
+      cleanup(workdir);
+    }
+  });
+
+  test('version drift on an installed optional package is still a real difference', () => {
+    const workdir = makeTree({
+      'package.json': { name: 'fixture' },
+      'package-lock.json': lockfile({
+        '@scope/darwin-pkg': { version: '1.0.0', optional: true, cpu: ['arm64'], os: ['darwin'] },
+      }),
+      'node_modules/@scope/darwin-pkg/package.json': { name: '@scope/darwin-pkg', version: '1.0.1' },
+    });
+    try {
+      const check = checkNodeModulesSnapshot(workdir, null, { diffFiles: ['src/index.js'] });
+      assert.equal(check.status, 'inconsistent');
+      assert.deepEqual(check.differences, [
+        'node_modules/@scope/darwin-pkg/package.json: version 1.0.1 (replay) vs 1.0.0 (lockfile)',
+      ]);
+      assert.equal(check.optionalExempted, 0);
+    } finally {
+      cleanup(workdir);
+    }
+  });
+
+  test('parseJsonc keeps // inside strings and drops comments + trailing commas', () => {
+    const parsed = parseJsonc(`{
+      // a comment line
+      "a": "sha512-abc//def==",
+      "b": [1, 2,],
+      /* block comment */
+      "c": { "d": true, },
+    }`);
+    assert.deepEqual(parsed, { a: 'sha512-abc//def==', b: [1, 2], c: { d: true } });
+  });
+
+  test('bun.lock is parsed as a lockfile authority (M6 slice 3, #135)', () => {
+    // Fixture in the real bun.lock shape (verified against
+    // oh-my-openagent#8014, merge 51ddf958): JSONC with a comment and
+    // trailing commas, integrity hashes containing `//`, platform
+    // packages carrying os/cpu in the entry meta, optional packages
+    // listed under workspaces / entry optionalDependencies.
+    const bunLock = `{
+      // bun.lock fixture
+      "lockfileVersion": 1,
+      "workspaces": {
+        "": {
+          "name": "fixture",
+          "dependencies": { "js-yaml": "^4.1.0" },
+          "optionalDependencies": { "platform-pkg": "^1.0.0" },
+        },
+      },
+      "packages": {
+        "js-yaml": ["js-yaml@4.1.0", "", { "optionalDependencies": { "plain-opt": "2.0.0" } }, "sha512-abc//def=="],
+        "platform-pkg": ["platform-pkg@1.0.0", "", { "os": "darwin", "cpu": "arm64" }, "sha512-xyz=="],
+        "plain-opt": ["plain-opt@2.0.0", "", {}, "sha512-qq=="],
+      },
+    }`;
+    const root = makeTree({ 'bun.lock': bunLock });
+    try {
+      const entries = readBunLockEntries(root);
+      assert.equal(entries.get('js-yaml').version, '4.1.0');
+      assert.equal(entries.get('js-yaml').optional, false);
+      assert.equal(entries.get('platform-pkg').version, '1.0.0');
+      assert.equal(entries.get('platform-pkg').optional, true);
+      assert.equal(entries.get('platform-pkg').os, 'darwin');
+      assert.equal(entries.get('platform-pkg').cpu, 'arm64');
+      assert.equal(entries.get('plain-opt').optional, true);
+      assert.equal(readLockfileEntries(root).get('platform-pkg').version, '1.0.0');
+    } finally {
+      cleanup(root);
+    }
+    assert.equal(readBunLockEntries(makeTree({})), null);
+    assert.equal(readBunLockEntries(makeTree({ 'bun.lock': '{ not json' })), null);
+  });
+
+  test('bun.lock-only tree: matching install is consistent, missing optional is exempt', () => {
+    const bunLock = `{
+      "lockfileVersion": 1,
+      "workspaces": { "": { "name": "fixture", "optionalDependencies": { "platform-pkg": "^1.0.0" } } },
+      "packages": {
+        "js-yaml": ["js-yaml@4.1.0", "", {}, "sha512-abc=="],
+        "platform-pkg": ["platform-pkg@1.0.0", "", { "os": "darwin", "cpu": "arm64" }, "sha512-xyz=="],
+      },
+    }`;
+    const workdir = makeTree({
+      'package.json': { name: 'fixture' },
+      'bun.lock': bunLock,
+      'node_modules/js-yaml/package.json': { name: 'js-yaml', version: '4.1.0' },
+    });
+    try {
+      // No package-lock.json: bun.lock is the authority, and the
+      // missing optional platform package does not break consistency.
+      const check = checkNodeModulesSnapshot(workdir, null, { diffFiles: ['src/index.js'] });
+      assert.equal(check.status, 'consistent');
+      assert.equal(check.consistent, true);
+      assert.equal(check.optionalExempted, 1);
+      assert.deepEqual(check.exemptedPackages, ['platform-pkg']);
+    } finally {
+      cleanup(workdir);
+    }
+  });
+
+  test('readLockfileEntries prefers package-lock.json over bun.lock', () => {
+    const root = makeTree({
+      'package-lock.json': lockfile({ 'js-yaml': '4.1.0' }),
+      'bun.lock': `{
+        "lockfileVersion": 1,
+        "workspaces": {},
+        "packages": { "js-yaml": ["js-yaml@9.9.9", "", {}, "sha512-qq=="] },
+      }`,
+    });
+    try {
+      assert.equal(readLockfileEntries(root).get('js-yaml').version, '4.1.0');
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  test('listBunCachePackages reads bun .bun store dirs (scoped, hashed)', () => {
+    const root = makeTree({
+      'node_modules/.bun/@ai-sdk+provider@3.0.8/package.json': { name: '@ai-sdk/provider', version: '3.0.8' },
+      'node_modules/.bun/typescript@7.0.2/package.json': { name: 'typescript', version: '7.0.2' },
+      'node_modules/.bun/@anthropic-ai+claude-agent-sdk@0.3.306+02a3a1e1642d8bd3/package.json': { name: '@anthropic-ai/claude-agent-sdk', version: '0.3.306' },
+    });
+    try {
+      const cache = listBunCachePackages(join(root, 'node_modules'));
+      assert.deepEqual([...cache.get('@ai-sdk/provider')], ['3.0.8']);
+      assert.deepEqual([...cache.get('typescript')], ['7.0.2']);
+      assert.deepEqual([...cache.get('@anthropic-ai/claude-agent-sdk')], ['0.3.306']);
+      assert.deepEqual(listBunCachePackages(join(makeTree({}), 'node_modules')).size, 0);
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  test('bun-installed tree: packages in .bun store count as installed', () => {
+    // omo#8014: bun keeps most packages in node_modules/.bun and only
+    // symlinks a subset to the top level; a top-level-only scan
+    // over-reports "missing". A package present in .bun at the
+    // lockfile version counts as installed; present only at another
+    // version is drift, not missing.
+    const bunLock = `{
+      "lockfileVersion": 1,
+      "workspaces": {},
+      "packages": {
+        "js-yaml": ["js-yaml@4.1.0", "", {}, "sha512-abc=="],
+        "cached-pkg": ["cached-pkg@1.0.0", "", {}, "sha512-qq=="],
+        "drifted-pkg": ["drifted-pkg@2.0.0", "", {}, "sha512-rr=="],
+        "gone-pkg": ["gone-pkg@3.0.0", "", {}, "sha512-ss=="],
+      },
+    }`;
+    const workdir = makeTree({
+      'package.json': { name: 'fixture' },
+      'bun.lock': bunLock,
+      'node_modules/js-yaml/package.json': { name: 'js-yaml', version: '4.1.0' },
+      'node_modules/.bun/cached-pkg@1.0.0/package.json': { name: 'cached-pkg', version: '1.0.0' },
+      'node_modules/.bun/drifted-pkg@2.0.1/package.json': { name: 'drifted-pkg', version: '2.0.1' },
+    });
+    try {
+      const check = checkNodeModulesSnapshot(workdir, null, { diffFiles: ['src/index.js'] });
+      assert.equal(check.status, 'inconsistent');
+      assert.deepEqual(check.differences, [
+        'node_modules/drifted-pkg/package.json: version 2.0.1 (bun .bun store) vs 2.0.0 (lockfile)',
+        'node_modules/gone-pkg: missing in replay tree (expected 3.0.0)',
+      ]);
+    } finally {
+      cleanup(workdir);
     }
   });
 
