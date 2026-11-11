@@ -1,5 +1,17 @@
 # Release Notes
 
+## 0.5.29 - Milestone M9 "proof/audit findings as SARIF" accepted
+
+Patch release. Two merged PRs since 0.5.28, verified end to end in CI and locally — and the milestone they complete is now accepted.
+
+**Milestone M9 "proof/audit findings as SARIF" — accepted (issue #69; acceptance detail issue #148, comment 6806263843; #148 closed 2026-11-11T20:16:45Z).** Proof and audit findings are now emitted as SARIF 2.1.0, so GitHub code scanning surfaces them as alerts. Slice 1 (PR #150, merged 2026-11-11T19:47:59Z, squash 941ba522) is the SARIF generation core: every finding carries rule id, message, location, and an evidence pointer (`properties['evalid/evidence']`). Slice 2 (PR #152, merged 2026-11-11T20:15:09Z, squash acd71870) removes `continue-on-error` from the SARIF upload step in the proof-ledger workflow, so an upload failure fails the job instead of being swallowed; the upload runs only for same-repo PRs and skips visibly for fork PRs.
+
+**Acceptance evidence, all measured, not worker claims.** Six real-case SARIF files were each independently validated with jsonschema against `schemas/sarif-2.1.0.minimal.schema.json` — all pass: tampered seal binding (`evalid/binding-mismatch`, located at `specs/changes/m9s2-tamper/tdd/green-0.json`) and tampered test file (`evalid/green-tree-mismatch`, located at `test/demo.test.js`, message names the exact broken file) one finding each; claim/replay mismatch (`evalid/claim-replay-mismatch`, claimed 5 / replayed 3, located at `test/count.test.js`); clean seal and honest claim 3/3 each produce empty results (zero false positives); `proof --sarif` with no runs produces 241 `evalid/proof-incomplete` findings. Real-repo CI upload, evidence PR #153 (never to merge): proof ledger run 43092866680 (by-design failure — tampered proof makes verify exit 1), CI run 43092866716 success; code scanning analysis 2146969636 (results_count 1) and alert #3 (rule `evalid/binding-mismatch`, severity error, state open, location `specs/changes/m9s2-ci-tampered/tdd/green-0.json:1`), both read directly by the main round; default branch has 0 open alerts (the tampered proof never entered main, as expected). Evidence filed at #151, comment 6806158854.
+
+Honest note, stated plainly: the upload-failure path was not actually induced (no upload failure was faked); the claim that an upload failure now fails the job rests only on GitHub semantics after removing `continue-on-error` plus a file read of the workflow. Evidence PR #153 is never to be merged.
+
+Acceptance ledger, stated plainly: the issue #5 ledger is settled as a conclusion on the MiniMax full-matrix recheck (135/135 complete, 2026-11-10) — P2-1 passed, P1-2 / P1-3 / P2-3 did not pass — so no bench numbers are claimed in this release.
+
 ## 0.5.28 - Milestone M8 "I6b 回放树依赖供给" accepted
 
 Patch release. One merged PR since 0.5.27, verified end to end in CI and locally — and the milestone it completes is now accepted.
