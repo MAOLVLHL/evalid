@@ -1,5 +1,17 @@
 # Release Notes
 
+## 0.5.27 - Milestone M7 "J1 账本 agent/model 字段落地" accepted
+
+Patch release. One merged PR since 0.5.26, verified end to end in CI and locally — and the milestone it completes is now accepted.
+
+**Milestone M7 "J1 账本 agent/model 字段落地" — accepted (issue #69; acceptance detail issue #138, comment 6797474485; #69 comment 6797477317).** J1 now writes the executing agent/model into `verify_proof.json`, so `xflow trend` groups by real agent/model instead of always reporting `unknown`. Slice 1 (PR #140, merged 2026-11-11T13:35:03Z, squash afd52b32; main CI run 43030442378 success) adds `agent` / `model` to the J1 proof, resolved per field in order — explicit `--agent` / `--model` flags (the executor passes its own real identity) > environment variables `EVALID_AGENT` / `EVALID_MODEL` > `unknown`; empty values count as missing, never invented. The J1 input schema in `atoms/registry.json` gains optional `agent` / `model`. `xflow trend` itself is unchanged: per-agent/model grouping and unknown-grouping for legacy proofs were already implemented in M5 slice 1, and no historical ledger backfill is needed.
+
+**Acceptance evidence, all measured, not worker claims.** Slice 1: 5 new tests, RED then GREEN (all 5 failed at RED, per #139 evidence comment); local `npm test` 275 items, 274 pass, the single failure `test/i6d-acceptance-demo.test.js` fails identically on clean main and is unrelated to this change; PR #140 CI runs verify 43028092917 and ledger 43028092888 both pass. Slice 2 (no code change): 8 real J1 runs, 2 groups × 4 records, evidence in issue #141, comment 6797437856 — `xflow trend` reports muse/muse-spark-1.3 claimed 12 / replayed 8 / delta 4 / 33.3% / samples 12 and muse-subagent/muse-spark-1.3 claimed 12 / replayed 8 / delta 4 / 33.3% / samples 12, TOTAL 24 / 16 / 8 / 33.3% / samples 24, records 8, 0 skipped; hand-recomputed from the 8 raw `verify_proof.json` files by an independent script (not through `src/core/trend.js`), agreeing number-for-number. The read-only report is unchanged, and a field-stripped copy of a real proof still groups as `unknown` (trend output `unknown 3 / 2 / 1 / 33.3% / 3`, exit 0); the trend suite passes 18/18, including the legacy-proof-groups-as-unknown case. The main round independently re-read the 8 raw proofs and independently re-ran `xflow trend` before accepting.
+
+Honest note, stated plainly: the two groups report identical numbers because all 8 runs executed the same deterministic command set (each proof's `recorded_at` differs); each group's delta of 4 comes from the real replay of the pre-existing failing `test/i6d-acceptance-demo.test.js` on main (assertion: actual 1 / expected 0, reproduced in all 8 runs — the same single failure seen in the full-suite count of 274/275, unrelated to this milestone); group B was executed by a derived subagent and its identity is honestly recorded as `muse-subagent`.
+
+Acceptance ledger, stated plainly: the issue #5 ledger is settled as a conclusion on the MiniMax full-matrix recheck (135/135 complete, 2026-11-10) — P2-1 passed, P1-2 / P1-3 / P2-3 did not pass — so no bench numbers are claimed in this release.
+
 ## 0.5.26 - Milestone M6 "audit 回放保真度" accepted
 
 Patch release. Two merged PRs since 0.5.25, verified end to end in CI and locally — and the milestone they complete is now accepted.
