@@ -1,5 +1,17 @@
 # Release Notes
 
+## 0.5.24 - Milestone M3 "I6d assertion-execution gate" accepted
+
+Patch release. Two merged PRs since 0.5.23, verified end to end in CI and locally — and the milestone they complete is now accepted.
+
+**Milestone M3 "I6d assertion-execution gate" — accepted (issue #69; acceptance detail issue #119, comment 6786762925; #119 closed).** Every new/changed assertion must really execute — an unexecuted assertion no longer counts as green. Slice 1 (PR #121, merged 2026-11-11T03:54:17Z) adds the JS assertion-execution gate via V8 coverage, alongside the pytest gate: pytest + JS dual-language assertion-execution proof. Slice 2 (PR #123, merged 2026-11-11T04:09:09Z) supplies real-case evidence: 3 cases all run through the real gate, and in each case the tests themselves were all green before the fix while the gate judged red and named the line / assertion — case 1, a pytest dead-callback assertion (test_case1.py:3); case 2, a dead callback hiding a wrong expectation round(2.675,2)==2.68 (intermediate state pytest_failed); case 3, a JS EventEmitter dead-callback assertion (test_case3.test.js:8). All pass after the fix.
+
+**Acceptance evidence, all measured, not worker claims.** Slice 1: new tests 15/15, neighbouring audit + py gates 67/67, lite-track + tdd-proof 51/51 (independent re-run by the main round); PR #121 CI runs verify 42955147070 and ledger 42955147064 both pass. Slice 2: independent re-run 33/33; PR #123 CI runs verify 42956692900 and ledger 42956692941 both pass. Evidence landed on the epic: #122 comment 6786648683 + docs/i6d-m3-slice2-cases.md.
+
+Honest note, stated plainly: the 3 cases are constructed minimal reproduction cases, not historical real bugs — no ready-made historical bug was found in this repo's own tests. This is stated in the evidence doc, the test headers, the PR text, and the #122 comment. What the cases prove is the gate's own behaviour: they run the real gate code and its verdict output is measured, so the "real cases caught by the gate" acceptance item is met in substance — the gate behaviour itself is verified, not only a test double.
+
+Acceptance ledger, stated plainly: the issue #5 ledger is settled as a conclusion on the MiniMax full-matrix recheck (135/135 complete, 2026-11-10) — P2-1 passed, P1-2 / P1-3 / P2-3 did not pass — so no bench numbers are claimed in this release.
+
 ## 0.5.23 - Milestone M2 "xflow audit" accepted
 
 Patch release. Two merged PRs since 0.5.22, verified end to end in CI and locally — and the milestone they complete is now accepted.
