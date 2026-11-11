@@ -3,6 +3,13 @@
 All notable changes to this project are documented here. Detailed notes live in
 [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## [0.5.25] - 2026-11-11
+
+### Added
+- **Milestone M5 "判定历史趋势" — accepted (issue #69; acceptance detail issue #125, comment 6789560856; #125 closed)**: `xflow trend` aggregates the proof ledger into claimed-vs-replayed rates, grouped by repo and by agent/model, with a `--since` window and `--json` mode. Read-only report: no seal, replay, or verdict behaviour changes. ① Slice 1 (PR #127, merged 2026-11-11T05:31:21Z, HEAD 187d58fe): ledger aggregation (`src/core/trend.js`) + `xflow trend` CLI — per-repo claimed / replayed / delta / delta% / samples table, `--since` window, `--json` output; missing ledger or empty window prints an actionable hint (exit 3), bad repo path / date is misuse (exit 2). Test evidence: 17 new tests in `test/xflow-trend.test.js`; local `npm run verify` 645 pass, 0 fail (per the merged commit message); PR CI runs verify 42965510663 and ledger 42965510662 both pass. ② Slice 2 (no code change): real-warehouse trend report evidence — two real repos, each with 2 proof ledgers, reported in issue #128, comment 6789533314. Both repos report claimed 4 / replayed 3 / delta 1 / delta rate 25.0% / samples 4, records 2, 0 skipped, exit 0; hand-recomputed from the 4 raw `verify_proof.json` files, both groups agree number-for-number (evalid-a 2 results / 1 passed, evalid-b 2 / 2; swrm-a 2 / 1, swrm-b 2 / 2); `--since 2026-11-11` keeps both records, `--since 2026-11-12` correctly reports an empty window (exit 3), `--json` matches the text table (`delta_rate: 0.25`).
+
+Honest note, stated plainly: both groups' agent/model read `unknown` — the J1 ledger carries no agent/model fields, so per-agent/model grouping has not yet been demonstrated on real data; follow-up filed as issue #129, not a blocker for this milestone.
+
 ## [0.5.24] - 2026-11-11
 
 ### Added
