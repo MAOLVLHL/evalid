@@ -82,6 +82,7 @@ def main():
         'git_head': tdd_lib.git_head(project),
         'file_hashes': file_hashes,
         'snapshot_scope': snapshot_scope,
+        'install': tdd_lib.seal_install_record(project),
         'failure_kind': 'timeout' if timed_out else tdd_lib.classify_output(combined, passed),
         'recorded_at': datetime.now(timezone.utc).isoformat(),
     }

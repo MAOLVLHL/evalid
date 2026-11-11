@@ -54,6 +54,7 @@ BINDING_FIELDS = (
     "snapshot_scope",
     "failure_kind",
     "recorded_at",
+    "install",
 )
 ASSERTION_PATTERN = re.compile(
     r"(?:"
@@ -264,7 +265,7 @@ def verify_hashes_by_stat(root: Path, hashes: dict, stats: dict | None) -> dict:
 
 # Optional binding fields join the payload only when present, so proofs
 # sealed before the field existed keep verifying byte-for-byte.
-OPTIONAL_BINDING_FIELDS = {"snapshot_scope"}
+OPTIONAL_BINDING_FIELDS = {"snapshot_scope", "install"}
 
 
 def binding_payload(proof: dict) -> dict:
@@ -960,11 +961,12 @@ def run_shell(command: str, cwd: Path, timeout: int = 120) -> subprocess.Complet
     )
 
 
-def reexec_snapshot(destination: Path, command: str, timeout: int = 120):
+def reexec_snapshot(destination: Path, command: str, timeout: int = 120, install: dict | None = None):
     temp = Path(tempfile.mkdtemp(prefix="evalid-proof-"))
     try:
         if any(destination.iterdir()):
             shutil.copytree(destination, temp, dirs_exist_ok=True)
+        run_install_step(temp, install, timeout=timeout)
         result = run_shell(command, temp, timeout=timeout)
         text = f"{result.stdout or ''}\n{result.stderr or ''}"
         return result.returncode, text
@@ -972,14 +974,216 @@ def reexec_snapshot(destination: Path, command: str, timeout: int = 120):
         shutil.rmtree(temp, ignore_errors=True)
 
 
+# --- Replay dependency supply (M8 slice 1, issue #144) --------------------
+# I6b rebuilds the tree from `git archive`, which never contains
+# node_modules, so a test importing an npm dependency failed with
+# no_test_evidence instead of its real red/green result (issue #111).
+# The replay tree now gets its dependencies supplied inside the replay:
+# the install step the seal was taken against is re-run in the replay
+# tree before the test command. The seal covers the install result
+# (lockfile + package.json hashes and the installed top-level package
+# versions); any divergence is an explicit error, never a silent
+# fallback to running the tests without dependencies.
+
+class ReplayInstallError(RuntimeError):
+    """The replay tree's dependencies could not be supplied as sealed."""
+
+
+# (lockfile, tool, install command), in detection priority order. A repo
+# with several lockfiles uses the first one present; the sealed record
+# names it, so a replay tree that needs a different step is a mismatch.
+INSTALL_LOCKFILES = (
+    ("package-lock.json", "npm", "npm ci --no-audit --no-fund"),
+    ("bun.lockb", "bun", "bun install --frozen-lockfile"),
+    ("bun.lock", "bun", "bun install --frozen-lockfile"),
+    ("pnpm-lock.yaml", "pnpm", "pnpm install --frozen-lockfile"),
+    ("yarn.lock", "yarn", "yarn install --frozen-lockfile"),
+)
+
+
+def detect_install_step(tree: Path) -> dict | None:
+    """The install step a tree needs, or None when it declares no deps.
+
+    A tree without package.json has nothing to install. With package.json
+    the step follows the lockfile present (frozen install); without any
+    lockfile it is a plain `npm install`, which resolves fresh.
+    """
+    tree = Path(tree)
+    if not (tree / "package.json").is_file():
+        return None
+    for lockfile, tool, command in INSTALL_LOCKFILES:
+        if (tree / lockfile).is_file():
+            return {"tool": tool, "command": command, "lockfile": lockfile}
+    return {"tool": "npm", "command": "npm install --no-audit --no-fund", "lockfile": None}
+
+
+def installed_packages(node_modules_dir: Path) -> dict | None:
+    """Top-level installed packages: name -> version (None when unreadable).
+
+    Mirrors src/core/audit.js listInstalledPackages: only top-level
+    entries, scoped packages expanded, dot-directories skipped. Returns
+    None when there is no node_modules dir at all, so "no installed
+    tree" stays distinguishable from "an empty installed tree".
+    """
+    node_modules_dir = Path(node_modules_dir)
+    if not node_modules_dir.is_dir():
+        return None
+    installed: dict[str, str | None] = {}
+
+    def read_one(name: str, directory: Path) -> None:
+        version: str | None = None
+        try:
+            parsed = json.loads((directory / "package.json").read_text(encoding="utf-8"))
+            if isinstance(parsed, dict) and isinstance(parsed.get("version"), str):
+                version = parsed["version"]
+        except (OSError, ValueError):
+            pass
+        installed[name] = version
+
+    try:
+        entries = list(os.scandir(node_modules_dir))
+    except OSError:
+        return installed
+    for entry in entries:
+        if not entry.is_dir() or entry.name.startswith("."):
+            continue
+        if entry.name.startswith("@"):
+            try:
+                scoped = list(os.scandir(Path(entry.path)))
+            except OSError:
+                continue
+            for sub in scoped:
+                if sub.is_dir():
+                    read_one(f"{entry.name}/{sub.name}", Path(sub.path))
+        else:
+            read_one(entry.name, Path(entry.path))
+    return installed
+
+
+def _hash_file(path: Path) -> str | None:
+    try:
+        return sha256_bytes(path.read_bytes())
+    except OSError:
+        return None
+
+
+def seal_install_record(project_root: Path) -> dict | None:
+    """The install fingerprint the seal ran against, or None with no deps.
+
+    Records the install step the tree needs, the hashes of the files that
+    step reads (package.json + lockfile), and the installed top-level
+    package versions actually present when the test ran. The replay
+    re-runs the same step and must reproduce the same result.
+    """
+    project_root = Path(project_root)
+    step = detect_install_step(project_root)
+    if step is None:
+        return None
+    record = {
+        "tool": step["tool"],
+        "command": step["command"],
+        "lockfile": step["lockfile"],
+        "lockfile_sha256": _hash_file(project_root / step["lockfile"]) if step["lockfile"] else None,
+        "package_json_sha256": _hash_file(project_root / "package.json"),
+        "installed": installed_packages(project_root / "node_modules"),
+    }
+    return record
+
+
+def _install_result_diff(sealed_installed: dict, replay_installed: dict) -> list[str]:
+    diffs: list[str] = []
+    for name in sorted(set(sealed_installed) | set(replay_installed)):
+        sealed_version = sealed_installed.get(name, "<missing>")
+        replay_version = replay_installed.get(name, "<missing>")
+        if sealed_version != replay_version:
+            diffs.append(f"{name}: sealed {sealed_version} vs replay {replay_version}")
+    return diffs
+
+
+def run_install_step(tree: Path, sealed: dict | None, timeout: int = 120) -> dict:
+    """Supply dependencies inside a replay tree, as sealed.
+
+    Runs the detected install step in `tree` before the test command.
+    Raises ReplayInstallError — never silently proceeds — when:
+    * the tree needs a different install step than the seal recorded;
+    * the lockfile / package.json the step reads differs from the seal;
+    * the install tool is missing or the install itself fails / times out;
+    * the installed top-level versions differ from the sealed result.
+    Returns {"deps": <command or "none">, "installed_count": n}.
+    Proofs sealed before the install record existed (sealed is None)
+    install from the tree as-is and skip the sealed-result comparison.
+    """
+    tree = Path(tree)
+    step = detect_install_step(tree)
+    if step is None:
+        return {"deps": "none", "installed_count": 0}
+    if sealed is not None:
+        if sealed.get("command") != step["command"] or sealed.get("lockfile") != step["lockfile"]:
+            raise ReplayInstallError(
+                "replay install step mismatch: sealed "
+                f"'{sealed.get('command')}' (lockfile {sealed.get('lockfile')}) but replay tree needs "
+                f"'{step['command']}' (lockfile {step['lockfile']}); refusing to run tests without the sealed dependencies"
+            )
+        lockfile = step["lockfile"]
+        if lockfile is not None and _hash_file(tree / lockfile) != sealed.get("lockfile_sha256"):
+            raise ReplayInstallError(
+                f"replay install input mismatch: {lockfile} in the replay tree differs from the sealed hash; "
+                "refusing to run tests without the sealed dependencies"
+            )
+        if _hash_file(tree / "package.json") != sealed.get("package_json_sha256"):
+            raise ReplayInstallError(
+                "replay install input mismatch: package.json in the replay tree differs from the sealed hash; "
+                "refusing to run tests without the sealed dependencies"
+            )
+    if shutil.which(step["tool"]) is None:
+        raise ReplayInstallError(
+            f"replay install tool '{step['tool']}' not found in PATH, cannot run '{step['command']}'; "
+            "refusing to run tests without the sealed dependencies"
+        )
+    try:
+        result = run_shell(step["command"], tree, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise ReplayInstallError(
+            f"replay install timed out after {timeout}s: '{step['command']}'; "
+            "refusing to run tests without the sealed dependencies"
+        ) from None
+    if result.returncode != 0:
+        tail = f"{result.stdout or ''}\n{result.stderr or ''}".strip()[-500:]
+        raise ReplayInstallError(
+            f"replay install failed: '{step['command']}' exited {result.returncode}: {tail}"
+        )
+    # A frozen install must not rewrite its inputs; a lockfile-less
+    # `npm install` legitimately writes a fresh lockfile, which the seal
+    # (lockfile_sha256 None) already accounts for.
+    if step["lockfile"] is not None and sealed is not None:
+        if _hash_file(tree / step["lockfile"]) != sealed.get("lockfile_sha256"):
+            raise ReplayInstallError(
+                f"replay install rewrote {step['lockfile']}; the sealed install result is not reproduced"
+            )
+    installed = installed_packages(tree / "node_modules")
+    if sealed is not None and sealed.get("installed") is not None and installed is not None:
+        diffs = _install_result_diff(sealed["installed"], installed)
+        if diffs:
+            shown = "; ".join(diffs[:10])
+            extra = f" (+{len(diffs) - 10} more)" if len(diffs) > 10 else ""
+            raise ReplayInstallError(
+                f"replay install result mismatch ({len(diffs)} package(s)): {shown}{extra}"
+            )
+    return {"deps": step["command"], "installed_count": len(installed) if installed is not None else 0}
+
+
 def reexec_scoped_snapshot(project_root: Path, destination: Path, command: str,
-                           git_head_ref: str, scope: dict, timeout: int = 120):
+                           git_head_ref: str, scope: dict, timeout: int = 120,
+                           install: dict | None = None):
     """Replay a scoped proof: rebuild the sealed tree, then re-run.
 
     Unchanged files come from `git archive` at the recorded HEAD (their
     seal-time content is HEAD content by construction of the scope), deleted
     paths stay deleted, and the sealed scoped files are overlaid last so
-    they win over the archive.
+    they win over the archive. Dependencies are supplied inside the
+    replay tree (M8 slice 1, #144): the sealed install step is re-run
+    before the test command, so a test importing an npm dependency really
+    executes instead of failing with no_test_evidence.
     """
     temp = Path(tempfile.mkdtemp(prefix="evalid-proof-"))
     try:
@@ -1005,6 +1209,7 @@ def reexec_scoped_snapshot(project_root: Path, destination: Path, command: str,
                 target.unlink()
         if any(destination.iterdir()):
             shutil.copytree(destination, temp, dirs_exist_ok=True)
+        run_install_step(temp, install, timeout=timeout)
         result = run_shell(command, temp, timeout=timeout)
         text = f"{result.stdout or ''}\n{result.stderr or ''}"
         return result.returncode, text

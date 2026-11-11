@@ -111,10 +111,15 @@ def main():
     try:
         if scoped:
             actual_exit, actual_text = tdd_lib.reexec_scoped_snapshot(
-                project, destination, proof.get('command') or '', proof['git_head'], scope, timeout=120
+                project, destination, proof.get('command') or '', proof['git_head'], scope, timeout=120,
+                install=proof.get('install'),
             )
         else:
-            actual_exit, actual_text = tdd_lib.reexec_snapshot(destination, proof.get('command') or '', timeout=120)
+            actual_exit, actual_text = tdd_lib.reexec_snapshot(
+                destination, proof.get('command') or '', timeout=120, install=proof.get('install'),
+            )
+    except tdd_lib.ReplayInstallError as exc:
+        emit({'ok': False, 'verdict': 'replay_install_failed', 'phase': args.phase, 'error': str(exc)[:500]}, 1)
     except RuntimeError as exc:
         emit({'ok': False, 'verdict': 'replay_source_missing', 'phase': args.phase, 'error': str(exc)[:300]}, 1)
     except subprocess.TimeoutExpired:
