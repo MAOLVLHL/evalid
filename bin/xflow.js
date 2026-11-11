@@ -8,6 +8,7 @@
  *   corps                        Run the heavy corps workflow through its governed entry
  *   proof                        Verify workflow completion evidence and write proof
  *   audit                        Audit any git diff / PR: replay claimed test runs, verdict
+ *   trend                        Show claimed-vs-replayed trend from the proof ledger
  *   doctor                       Check local xflow readiness
  *   evaluate                     Show one-shot external evaluator brief
  *   release status               Show release-owner publish status
@@ -34,7 +35,7 @@
  *   serve                        Start HTTP control plane (heavy track only)
  */
 
-import { readFileSync, existsSync, mkdirSync, writeFileSync, rmSync, readdirSync, mkdtempSync } from 'fs';
+import { readFileSync, existsSync, mkdirSync, writeFileSync, rmSync, readdirSync, mkdtempSync, statSync } from 'fs';
 import { resolve, dirname, relative } from 'path';
 import { fileURLToPath } from 'url';
 import { spawnSync } from 'child_process';
@@ -42,6 +43,7 @@ import { createHash } from 'crypto';
 import { tmpdir } from 'os';
 import { ackPendingGate } from '../src/core/pending-gates.js';
 import { runAudit, renderAuditReport, parseAuditTarget } from '../src/core/audit.js';
+import { aggregateTrend, collectTrendRecords, parseSinceDate, renderTrendReport } from '../src/core/trend.js';
 import { readEntriesFromOffset, readExecutionLogSize } from '../src/core/log-tail.js';
 import { exportDomRectsToFile, resolveCliPath } from '../src/agent_team/atoms/visual/dom-rect-export.js';
 import { capturePageEvidence } from '../src/agent_team/atoms/visual/page-evidence-capture.js';
@@ -88,6 +90,9 @@ async function main() {
       break;
     case 'audit':
       await handleAudit([subcommand, ...rest].filter(Boolean));
+      break;
+    case 'trend':
+      await handleTrend([subcommand, ...rest].filter(Boolean));
       break;
     case 'gate':
       await handleGate(subcommand, rest);
@@ -5945,6 +5950,59 @@ async function handleAudit(args) {
   process.exit(report.exitCode);
 }
 
+// ─── trend ───────────────────────────────────────────────────────────────────
+// Read-only trend report (M5, #126): aggregate the proof ledger
+// (specs/changes/<id>/verify_proof.json) into claimed-vs-replayed rates,
+// grouped by repo and agent/model inside the --since window. Nothing here
+// seals, replays, or judges anything; it only reads ledger files and counts.
+async function handleTrend(args) {
+  if (args.some(isHelpRequest)) {
+    printTrendHelp();
+    return;
+  }
+  const parsedArgs = parseCliArgs(args);
+  const repoDir = resolve(parsedArgs.repo || process.cwd());
+  let repoIsDir = false;
+  try {
+    repoIsDir = statSync(repoDir).isDirectory();
+  } catch {
+    repoIsDir = false;
+  }
+  if (!repoIsDir) {
+    console.error(`xflow trend: repo not found: ${repoDir}`);
+    process.exit(2);
+  }
+  let since = null;
+  if (parsedArgs.since !== undefined) {
+    try {
+      parseSinceDate(String(parsedArgs.since));
+      since = String(parsedArgs.since);
+    } catch (error) {
+      console.error(`xflow trend: ${error.message}`);
+      process.exit(2);
+    }
+  }
+  const collected = collectTrendRecords(repoDir);
+  if (collected.scanned === 0) {
+    console.log(`xflow trend: no proof ledger found in ${repoDir}`);
+    console.log('No specs/changes/*/verify_proof.json files under this repo.');
+    console.log('Run a workflow with TDD proof (xflow proof) or an audit');
+    console.log(`(xflow audit --out <file>) in this repo first, then re-run:`);
+    console.log(`  xflow trend --repo ${repoDir}`);
+    process.exit(3);
+  }
+  const aggregation = aggregateTrend(collected.records, { since, skipped: collected.skipped });
+  if (aggregation.record_count === 0) {
+    console.log(`xflow trend: no proof records in window (${since ? `--since ${since}` : 'all time'})`);
+    console.log(`Found ${collected.scanned} proof file(s) in ${repoDir}, but none recorded on or after ${since || '(no window set)'}.`);
+    console.log('Drop --since or pick an earlier date:');
+    console.log(`  xflow trend --repo ${repoDir}`);
+    process.exit(3);
+  }
+  if (parsedArgs.json) console.log(JSON.stringify(aggregation, null, 2));
+  else console.log(renderTrendReport(aggregation));
+}
+
 async function buildWorkflowProof({ track, workflowPath, projectRoot, changeId, write = true }) {
   const { load } = await import('../src/core/workflow-loader.js');
   const { readExecutionLog } = await import('../src/core/execution-log.js');
@@ -6910,6 +6968,28 @@ Options:
 `);
 }
 
+function printTrendHelp() {
+  console.log(`
+Usage: xflow trend [--repo <path>] [--since <date>] [--json]
+
+Aggregate the proof ledger into a claimed-vs-replayed trend report,
+grouped by repo and agent/model inside the window. Each verify_proof.json
+counts its verification commands as claimed passes and its passed results
+as replayed passes; the delta is claimed minus replayed.
+
+Read-only: trend never seals, replays, or changes any verdict.
+
+Options:
+  --repo PATH         Repo to read the ledger from, default: current directory
+  --since YYYY-MM-DD  Only count proofs recorded on or after this UTC date
+  --json              Print the machine-readable aggregation
+  help, -h, --help    Show this help message
+
+Exit codes: 0 table printed, 2 misuse (bad repo path or --since date),
+3 no proof ledger / no records in window (hint printed, no empty table).
+`);
+}
+
 function printProofHelp() {
   console.log(`
 Usage: xflow proof [--track corps] --change-id <id> [--project-root <path>]
@@ -7405,6 +7485,8 @@ Usage:
   xflow corps --title <title>    Run heavy track through governed entry
   xflow proof --track corps      Verify final execution proof
   xflow audit --pr 75 [--json]   Audit a PR: replay its claimed test runs
+  xflow trend [--repo .] [--since 2026-11-01]
+                                 Claimed-vs-replayed trend from the proof ledger
   xflow doctor [--json]          Check local xflow readiness
   xflow init [--project-root .]   Create project-local xflow config
   xflow goal set "<goal>"        Write the project-level .xflow/GOAL.md anchor

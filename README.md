@@ -263,6 +263,7 @@ top-level command below was verified against `xflow <command> --help` at v0.5.7;
 | `xflow corps` | Run the heavy product/multi-agent workflow through its governed entry point |
 | `xflow proof` | Verify workflow completion evidence and write the proof file |
 | `xflow audit` | Audit any git diff / PR: replay claimed test runs, verdict |
+| `xflow trend` | Claimed-vs-replayed trend from the proof ledger, grouped by repo and agent/model |
 | `xflow doctor` | Check local xflow readiness: package scripts, workflow YAMLs, skill topology |
 | `xflow init` | Create project-local `.as-xflow/config.json` with portable defaults |
 | `xflow goal show \| set \| audit \| clear` | Manage the project-level `.xflow/GOAL.md` anchor |
