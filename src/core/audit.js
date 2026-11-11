@@ -31,6 +31,16 @@
  *
  * Exit codes mirror the verdicts: 0 verified, 1 mismatch/unverifiable,
  * 2 misuse, 3 no_claims (inconclusive, not a failure of the change).
+ *
+ * Slice 1 (M6, issue #132) adds bun test recognition (claim extraction
+ * and replay-count parsing for `bun test` / `bun run test`, whose
+ * summary is count-first: " N pass / N fail / Ran N tests across M
+ * files") and a node_modules snapshot-consistency judgement on the
+ * replay tree: a missing snapshot with unchanged dependencies is an
+ * environment gap, not a mismatch (the #111 root cause, classified at
+ * the audit level), while a real inconsistency names the exact
+ * differing files. The judgement only classifies — it never flips a
+ * verdict by itself.
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -51,11 +61,13 @@ export const TEST_COMMAND_PATTERNS = [
   /cargo\s+test\b/,
   /mvn\s+(?:-[^ ]+\s+)*test\b/,
   /npx\s+[\w@./-]+/,
+  /bun\s+test\b/,
+  /bun\s+run\s+[\w:.-]+/,
 ];
 
 const COMMAND_CHARS = String.raw`[\w@./:+\-='"]`;
 const COMMAND_TAIL = new RegExp(
-  String.raw`(?:npm\s+test|npm\s+run\s+[\w:.-]+|pnpm\s+test|yarn\s+test|node\s+--test(?:\s+${COMMAND_CHARS}+)*|pytest(?:\s+${COMMAND_CHARS}+)*|python3?\s+-m\s+pytest(?:\s+${COMMAND_CHARS}+)*|python3?\s+-m\s+unittest(?:\s+${COMMAND_CHARS}+)*|go\s+test(?:\s+${COMMAND_CHARS}+)*|cargo\s+test(?:\s+${COMMAND_CHARS}+)*|mvn\s+(?:-[^\s]+\s+)*test|npx\s+[\w@./-]+(?:\s+${COMMAND_CHARS}+)*)`,
+  String.raw`(?:npm\s+test|npm\s+run\s+[\w:.-]+|pnpm\s+test|yarn\s+test|node\s+--test(?:\s+${COMMAND_CHARS}+)*|pytest(?:\s+${COMMAND_CHARS}+)*|python3?\s+-m\s+pytest(?:\s+${COMMAND_CHARS}+)*|python3?\s+-m\s+unittest(?:\s+${COMMAND_CHARS}+)*|go\s+test(?:\s+${COMMAND_CHARS}+)*|cargo\s+test(?:\s+${COMMAND_CHARS}+)*|mvn\s+(?:-[^\s]+\s+)*test|npx\s+[\w@./-]+(?:\s+${COMMAND_CHARS}+)*|bun\s+test(?:\s+${COMMAND_CHARS}+)*|bun\s+run\s+[\w:.-]+)`,
 );
 
 export function isTestCommand(text) {
@@ -392,6 +404,23 @@ export function parseReplayCounts(output, command) {
     return { passed: nodePass, failed: nodeFail, total: nodeFail !== null ? nodePass + nodeFail : null };
   }
   if (nodePasses.length > 1 || nodeFails.length > 1) return null;
+  // bun test prints one aggregated totals block per invocation:
+  // " 18 pass\n 0 fail\n ... \nRan 18 tests across 2 files."
+  // (verified against bun v1.4.4, 2026-11-11; M6 slice 1, #132).
+  // Count-first, unlike the "# pass N" lines node --test prints, so
+  // the two never collide; "(pass)" per-test lines do not match either
+  // (they carry no leading count). Multi-file runs still aggregate
+  // into one block, so a single pair is a comparable total.
+  const bunPasses = [...text.matchAll(/^\s*(\d+)\s+pass\s*$/gm)];
+  const bunFails = [...text.matchAll(/^\s*(\d+)\s+fail\s*$/gm)];
+  if (bunPasses.length === 1 && bunFails.length <= 1) {
+    const bunPass = Number(bunPasses[0][1]);
+    const bunFail = bunFails.length === 1 ? Number(bunFails[0][1]) : null;
+    const ranAcross = text.match(/Ran (\d+) tests? across \d+ files?/);
+    const total = ranAcross ? Number(ranAcross[1]) : (bunFail !== null ? bunPass + bunFail : null);
+    return { passed: bunPass, failed: bunFail, total };
+  }
+  if (bunPasses.length > 1 || bunFails.length > 1) return null;
   // python -m unittest prints one summary per run: "Ran N tests in ...",
   // then "OK" (optionally "OK (skipped=S)") or "FAILED (failures=F,
   // errors=E)". Same count semantics as the pytest branch below:
@@ -426,6 +455,203 @@ export function parseReplayCounts(output, command) {
   }
   if (/test[s]?\s+passed/i.test(text) && /0\s+failed/i.test(text)) return { passed: null, failed: 0, total: null };
   return null;
+}
+
+/**
+ * Files whose change means the dependency tree changed (M6 slice 1,
+ * issue #132). A diff touching one of these changes what the replay
+ * tree must install; a diff touching none of them leaves the tree alone.
+ */
+export const NODE_MODULES_LOCKFILES = ['package-lock.json', 'bun.lockb', 'bun.lock', 'yarn.lock', 'pnpm-lock.yaml'];
+
+export function isDependencyFile(path) {
+  const name = String(path || '').split('/').pop();
+  return name === 'package.json' || NODE_MODULES_LOCKFILES.includes(name);
+}
+
+/**
+ * Declared dependency versions from a package-lock.json (npm v7+
+ * `packages` map, or the legacy `dependencies` map). Returns a Map of
+ * name -> version, or null when there is no (parseable) lockfile.
+ * bun.lockb is binary and yarn/pnpm lockfiles use their own format, so
+ * they are not parsed here — their presence still marks the deps as
+ * changed (see isDependencyFile), but version-level comparison needs a
+ * package-lock.json.
+ */
+export function readLockfileVersions(dir) {
+  const lockPath = join(dir, 'package-lock.json');
+  if (!existsSync(lockPath)) return null;
+  let lock;
+  try {
+    lock = JSON.parse(readFileSync(lockPath, 'utf8'));
+  } catch {
+    return null;
+  }
+  const versions = new Map();
+  const packages = lock && lock.packages;
+  if (packages && typeof packages === 'object') {
+    for (const [key, entry] of Object.entries(packages)) {
+      if (!key.startsWith('node_modules/')) continue;
+      const rest = key.slice('node_modules/'.length);
+      // Skip nested installs (node_modules/a/node_modules/b): only the
+      // top-level tree is the snapshot under judgement.
+      if (rest.includes('node_modules/')) continue;
+      if (entry && typeof entry.version === 'string') versions.set(rest, entry.version);
+    }
+  } else if (lock && lock.dependencies && typeof lock.dependencies === 'object') {
+    for (const [name, entry] of Object.entries(lock.dependencies)) {
+      if (entry && typeof entry.version === 'string') versions.set(name, entry.version);
+    }
+  }
+  return versions;
+}
+
+/** Top-level installed packages under a node_modules dir: name -> { version }. */
+export function listInstalledPackages(nodeModulesDir) {
+  const installed = new Map();
+  if (!existsSync(nodeModulesDir)) return installed;
+  let entries;
+  try {
+    entries = readdirSync(nodeModulesDir, { withFileTypes: true });
+  } catch {
+    return installed;
+  }
+  const readOne = (name, dir) => {
+    const manifest = join(dir, 'package.json');
+    let version = null;
+    try {
+      const parsed = JSON.parse(readFileSync(manifest, 'utf8'));
+      if (parsed && typeof parsed.version === 'string') version = parsed.version;
+    } catch { /* unreadable manifest: version stays null, still listed */ }
+    installed.set(name, { version });
+  };
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+    if (entry.name.startsWith('@')) {
+      let scoped;
+      try {
+        scoped = readdirSync(join(nodeModulesDir, entry.name), { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const sub of scoped) {
+        if (!sub.isDirectory()) continue;
+        readOne(`${entry.name}/${sub.name}`, join(nodeModulesDir, entry.name, sub.name));
+      }
+    } else {
+      readOne(entry.name, join(nodeModulesDir, entry.name));
+    }
+  }
+  return installed;
+}
+
+/**
+ * Compare two installed node_modules trees and name the exact
+ * differences. Returns { differences, checked, truncated } where each
+ * difference names one file or package, e.g.
+ * "node_modules/js-yaml/package.json: version 4.1.1 (replay) vs 4.1.0
+ * (reference)". `onlyNames` restricts the comparison to declared
+ * dependencies; `reportMissing: false` reports version drift only.
+ */
+export function compareNodeModulesTrees(replayDir, referenceDir, options = {}) {
+  const { onlyNames = null, reportMissing = true, maxDifferences = 50 } = options;
+  const replay = listInstalledPackages(replayDir);
+  const reference = listInstalledPackages(referenceDir);
+  const names = new Set([...replay.keys(), ...reference.keys()]);
+  if (onlyNames) {
+    for (const name of [...names]) if (!onlyNames.has(name)) names.delete(name);
+  }
+  const all = [];
+  for (const name of [...names].sort()) {
+    const inReplay = replay.get(name);
+    const inReference = reference.get(name);
+    if (!inReplay && inReference) {
+      if (reportMissing) all.push(`node_modules/${name}: missing in replay tree (expected ${inReference.version ?? 'unknown version'})`);
+    } else if (inReplay && !inReference) {
+      if (reportMissing) all.push(`node_modules/${name}: only in replay tree (not in reference snapshot)`);
+    } else if (inReplay && inReference && inReplay.version !== null && inReference.version !== null && inReplay.version !== inReference.version) {
+      all.push(`node_modules/${name}/package.json: version ${inReplay.version} (replay) vs ${inReference.version} (reference)`);
+    }
+  }
+  return { differences: all.slice(0, maxDifferences), checked: names.size, truncated: all.length > maxDifferences };
+}
+
+/**
+ * Judge whether a replay tree's node_modules snapshot is consistent
+ * with what the change declares (M6 slice 1, issue #132; #111 root
+ * cause: the replay tree is built without node_modules).
+ *
+ *   workdir   — the replay tree (scratch clone, deps installed or not)
+ *   sourceDir — the repo the claim was produced against (its installed
+ *               tree is the claim-time snapshot), or null
+ *   options   — { diffFiles, lockfileVersions } (lockfileVersions may
+ *               be passed in: runAudit captures it before the install
+ *               step, so a lockfile npm generates cannot masquerade as
+ *               the audited one)
+ *
+ * Statuses:
+ *   no_package_json                  — nothing to install, nothing to judge
+ *   deps_unchanged_missing_snapshot  — no node_modules, but the diff
+ *     touches no dependency file: the absence is an environment gap,
+ *     NOT a mismatch signal (consistent: true)
+ *   deps_changed_missing_snapshot    — no node_modules and the diff
+ *     changes dependencies: cannot judge (consistent: null)
+ *   consistent / inconsistent       — the installed tree matches, or
+ *     differs from, the lockfile (and, with no lockfile, the source
+ *     snapshot); differences name the exact files. When a lockfile is
+ *     present it is the authority: a stale source tree does not make a
+ *     lockfile-exact replay "inconsistent".
+ *   no_snapshot_to_compare          — a tree is installed but there is
+ *     no lockfile and no source snapshot to judge it against
+ *     (consistent: null)
+ *
+ * This function only classifies; it never flips an audit verdict by
+ * itself. runAudit renders the differences and annotates a failing
+ * claim with them, so a snapshot-caused mismatch is classified instead
+ * of silently blamed on the change.
+ */
+export function checkNodeModulesSnapshot(workdir, sourceDir, options = {}) {
+  const { diffFiles = [], lockfileVersions = undefined } = options;
+  const depsChanged = (diffFiles || []).some(isDependencyFile);
+  if (!existsSync(join(workdir, 'package.json'))) {
+    return { status: 'no_package_json', consistent: null, depsChanged, differences: [], replayPresent: false, sourcePresent: false };
+  }
+  const replayDir = join(workdir, 'node_modules');
+  const replayPresent = existsSync(replayDir);
+  const sourceResolved = sourceDir ? resolve(sourceDir) : null;
+  const sourcePresent = !!sourceResolved && existsSync(join(sourceResolved, 'node_modules'));
+  const expected = lockfileVersions !== undefined ? lockfileVersions : readLockfileVersions(workdir);
+  if (!replayPresent) {
+    if (expected && expected.size === 0) {
+      // Zero declared dependencies: `npm ci` installs nothing and
+      // creates no node_modules dir at all (verified 2026-11-11) — the
+      // absent tree IS the expected tree, not a missing snapshot.
+      return { status: 'consistent', consistent: true, depsChanged, differences: [], replayPresent, sourcePresent };
+    }
+    if (!depsChanged) {
+      return { status: 'deps_unchanged_missing_snapshot', consistent: true, depsChanged, differences: [], replayPresent, sourcePresent };
+    }
+    return { status: 'deps_changed_missing_snapshot', consistent: null, depsChanged, differences: ['node_modules: missing in replay tree (dependencies changed in diff)'], replayPresent, sourcePresent };
+  }
+  const differences = [];
+  if (expected) {
+    const installed = listInstalledPackages(replayDir);
+    for (const [name, version] of expected) {
+      const got = installed.get(name);
+      if (!got) {
+        differences.push(`node_modules/${name}: missing in replay tree (expected ${version})`);
+      } else if (got.version !== null && got.version !== version) {
+        differences.push(`node_modules/${name}/package.json: version ${got.version} (replay) vs ${version} (lockfile)`);
+      }
+    }
+  } else if (!depsChanged && sourcePresent) {
+    const cmp = compareNodeModulesTrees(replayDir, join(sourceResolved, 'node_modules'));
+    differences.push(...cmp.differences);
+  } else {
+    return { status: 'no_snapshot_to_compare', consistent: null, depsChanged, differences: [], replayPresent, sourcePresent };
+  }
+  const consistent = differences.length === 0;
+  return { status: consistent ? 'consistent' : 'inconsistent', consistent, depsChanged, differences, replayPresent, sourcePresent };
 }
 
 function splitCommand(command) {
@@ -583,6 +809,10 @@ function replaySeal(workdir, repoRoot, seal, python, timeoutMs) {
  *               (default 'python3' / $PYTHON)
  *   i6d        — run the I6d assertion-execution gate when it applies
  *               (default true; --no-i6d on the CLI disables it)
+ *
+ * The report carries a `nodeModules` snapshot-consistency judgement
+ * (M6 slice 1, #132): status, whether the diff changes dependencies,
+ * and the exact differing files, if any.
  */
 export function runAudit(options = {}) {
   const {
@@ -629,6 +859,12 @@ export function runAudit(options = {}) {
       }
     }
 
+    // Capture the audited lockfile before the install step: `npm
+    // install` (no-lockfile repos) writes a fresh package-lock.json
+    // into the scratch clone, which must not masquerade as the audited
+    // one when the snapshot is judged (M6 slice 1, #132).
+    const lockfileVersions = readLockfileVersions(workdir);
+
     // Replay setup: a fresh clone has no node_modules, so a claimed command
     // that imports a dependency would fail for environmental reasons, not
     // because the change is broken. Install deps when package.json exists
@@ -654,8 +890,13 @@ export function runAudit(options = {}) {
         setup = { deps: 'none', error: `${installArgs[1]} failed: ${install.outputTail.slice(-300)}` };
       }
     }
+    // M6 slice 1 (#132): judge the replay tree's node_modules snapshot
+    // against the audited lockfile / source snapshot. A missing snapshot
+    // with unchanged dependencies is an environment gap, not a mismatch;
+    // a real inconsistency names the exact differing files.
+    const nodeModules = checkNodeModulesSnapshot(workdir, resolve(repoDir), { diffFiles: diff.files, lockfileVersions });
     if (setup.error) {
-      return { ok: false, verdict: 'unverifiable', error: `replay setup failed (${setup.error})`, claims, diff, setup, exitCode: 1 };
+      return { ok: false, verdict: 'unverifiable', error: `replay setup failed (${setup.error})`, claims, diff, setup, nodeModules, exitCode: 1 };
     }
 
     const claimResults = [];
@@ -688,6 +929,12 @@ export function runAudit(options = {}) {
       if (replay.timedOut) note = `replay timed out after ${timeoutMs}ms`;
       if (replay.spawnError) note = `could not run claimed command: ${replay.spawnError}`;
       if (!match && !note) note = `exit: claimed ${expectedExit}, replayed ${replay.exit}`;
+      if (!match && nodeModules.status === 'inconsistent' && nodeModules.differences.length > 0) {
+        const shown = nodeModules.differences.slice(0, 3).join('; ');
+        const more = nodeModules.differences.length > 3 ? ` (+${nodeModules.differences.length - 3} more)` : '';
+        const snapshotNote = `node_modules snapshot differs: ${shown}${more}`;
+        note = note ? `${note}; ${snapshotNote}` : snapshotNote;
+      }
       claimResults.push({ ...claim, replay: { ...replay, counts }, match, note, cwd: claimCwd });
       if (!match) mismatch = mismatch || note || 'claim mismatch';
     }
@@ -732,6 +979,7 @@ export function runAudit(options = {}) {
       claims: claimResults,
       seals: sealResults,
       i6d: i6dResult,
+      nodeModules,
       files: diff.files,
       testFiles: diff.testFiles,
       setup,
@@ -751,6 +999,11 @@ export function renderAuditReport(report) {
   const lines = [`xflow audit: ${report.verdict}`];
   if (report.error) lines.push(`error: ${report.error}`);
   if (report.setup?.deps && report.setup.deps !== 'none') lines.push(`replay deps: ${report.setup.deps}`);
+  if (report.nodeModules) {
+    const nm = report.nodeModules;
+    lines.push(`node_modules snapshot: ${nm.status}${nm.depsChanged ? ' (dependencies changed in diff)' : ''}`);
+    for (const d of nm.differences || []) lines.push(`  snapshot diff: ${d}`);
+  }
   if (report.files) {
     lines.push(`files touched: ${report.files.length} (${report.testFiles?.length ?? 0} test files)`);
     for (const file of report.testFiles || []) lines.push(`  test: ${file}`);

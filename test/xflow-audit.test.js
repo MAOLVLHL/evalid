@@ -6,13 +6,18 @@ import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 
 import {
+  checkNodeModulesSnapshot,
+  compareNodeModulesTrees,
   extractClaims,
+  isDependencyFile,
   isJavaScriptTestFile,
   isPythonTestFile,
+  isTestCommand,
   parseAuditTarget,
   parseClaimCounts,
   parseDiffFiles,
   parseReplayCounts,
+  readLockfileVersions,
   renderAuditReport,
   resolveClaimCwd,
   runAudit,
@@ -159,6 +164,35 @@ describe('extractClaims', () => {
     assert.equal(claims[1].command, 'python -m unittest discover');
     assert.equal(claims[2].command, 'python3 -m unittest -v tests.test_bar');
   });
+
+  test('extracts bun test claims with bun-style count-first pass/fail (M6 slice 1, #132)', () => {
+    // G3 (M2 acceptance): a PR whose body claims `bun test` was audited
+    // as no_claims — the runner list knew npm/node/pytest only.
+    assert.equal(isTestCommand('bun test'), true);
+    assert.equal(isTestCommand('bun run test'), true);
+    const body = 'Tests: `bun test` — 18 pass, 0 fail.';
+    const claims = extractClaims(body);
+    assert.equal(claims.length, 1, JSON.stringify(claims));
+    assert.equal(claims[0].command, 'bun test');
+    assert.equal(claims[0].claimedPassed, 18);
+    assert.equal(claims[0].claimedFailed, 0);
+    assert.equal(claims[0].claimedExit, 0);
+  });
+
+  test('extracts bun test with a file argument and the bun run test form (M6 slice 1, #132)', () => {
+    const body = [
+      'Tests: `bun test test/calc.test.ts` — 2 pass, 0 fail.',
+      'Full suite: `bun run test` — 18 pass, 0 fail.',
+    ].join('\n');
+    const claims = extractClaims(body);
+    assert.equal(claims.length, 2, JSON.stringify(claims));
+    assert.equal(claims[0].command, 'bun test test/calc.test.ts');
+    assert.equal(claims[0].claimedPassed, 2);
+    assert.equal(claims[0].claimedFailed, 0);
+    assert.equal(claims[1].command, 'bun run test');
+    assert.equal(claims[1].claimedPassed, 18);
+    assert.equal(claims[1].claimedFailed, 0);
+  });
 });
 
 describe('resolveClaimCwd (M2 slice 2, #116)', () => {
@@ -297,6 +331,230 @@ describe('parseReplayCounts', () => {
       parseReplayCounts('Ran 9 tests in 0.012s\n\nOK (skipped=1)\n'),
       { passed: 8, failed: 0, total: 9 },
     );
+  });
+
+  test('reads bun test summary lines: one aggregated block per run (M6 slice 1, #132)', () => {
+    // Real `bun test` v1.4.4 output (verified 2026-11-11): per-test
+    // "(pass)" lines, then a single totals block " N pass / N fail" and
+    // "Ran N tests across M files." — count-first, unlike node --test.
+    assert.deepEqual(
+      parseReplayCounts('calc.test.ts:\n(pass) adds [0.07ms]\n(pass) adds again [0.03ms]\n\n 2 pass\n 0 fail\n 2 expect() calls\nRan 2 tests across 1 file. [48.00ms]\n'),
+      { passed: 2, failed: 0, total: 2 },
+    );
+    assert.deepEqual(
+      parseReplayCounts('bad.test.ts:\n(pass) passes [0.04ms]\n(fail) fails [6.28ms]\n\n 1 pass\n 1 fail\n 2 expect() calls\nRan 2 tests across 1 file. [10.00ms]\n'),
+      { passed: 1, failed: 1, total: 2 },
+    );
+    // Multi-file run still prints one aggregated totals block.
+    assert.deepEqual(
+      parseReplayCounts(' 3 pass\n 1 fail\n 4 expect() calls\nRan 4 tests across 2 files. [5.00ms]\n'),
+      { passed: 3, failed: 1, total: 4 },
+    );
+  });
+});
+
+describe('node_modules snapshot consistency (M6 slice 1, #132)', () => {
+  function makeTree(structure) {
+    const root = mkdtempSync(join(tmpdir(), 'evalid-audit-snapshot-'));
+    for (const [rel, content] of Object.entries(structure)) {
+      const file = join(root, rel);
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, typeof content === 'string' ? content : JSON.stringify(content, null, 2));
+    }
+    return root;
+  }
+
+  function lockfile(versions) {
+    const packages = { '': { name: 'fixture', version: '1.0.0' } };
+    for (const [name, version] of Object.entries(versions)) packages[`node_modules/${name}`] = { version };
+    return { name: 'fixture', lockfileVersion: 3, packages };
+  }
+
+  function cleanup(...roots) {
+    for (const root of roots) rmSync(root, { recursive: true, force: true });
+  }
+
+  test('isDependencyFile covers manifests and lockfiles', () => {
+    assert.equal(isDependencyFile('package.json'), true);
+    assert.equal(isDependencyFile('package-lock.json'), true);
+    assert.equal(isDependencyFile('bun.lockb'), true);
+    assert.equal(isDependencyFile('bun.lock'), true);
+    assert.equal(isDependencyFile('yarn.lock'), true);
+    assert.equal(isDependencyFile('pnpm-lock.yaml'), true);
+    assert.equal(isDependencyFile('packages/pkg/package.json'), true);
+    assert.equal(isDependencyFile('src/index.js'), false);
+    assert.equal(isDependencyFile('test/a.test.js'), false);
+  });
+
+  test('readLockfileVersions reads npm v7+ packages and legacy dependencies', () => {
+    const root = makeTree({ 'package-lock.json': lockfile({ 'js-yaml': '4.1.0', '@scope/pkg': '2.0.1' }) });
+    try {
+      const versions = readLockfileVersions(root);
+      assert.equal(versions.get('js-yaml'), '4.1.0');
+      assert.equal(versions.get('@scope/pkg'), '2.0.1');
+      assert.equal(versions.has(''), false);
+    } finally {
+      cleanup(root);
+    }
+    const legacy = makeTree({ 'package-lock.json': { dependencies: { 'js-yaml': { version: '3.14.1' } } } });
+    try {
+      assert.equal(readLockfileVersions(legacy).get('js-yaml'), '3.14.1');
+    } finally {
+      cleanup(legacy);
+    }
+    assert.equal(readLockfileVersions(makeTree({})), null);
+  });
+
+  test('deps unchanged + replay node_modules missing is not a mismatch signal (#111 root cause)', () => {
+    // The replay tree has no node_modules snapshot at all, but the diff
+    // touches no dependency file: the absence must not read as a
+    // mismatch — it is an environment gap, not a broken change.
+    const workdir = makeTree({ 'package.json': { name: 'fixture' } });
+    try {
+      const check = checkNodeModulesSnapshot(workdir, null, { diffFiles: ['src/index.js'] });
+      assert.equal(check.status, 'deps_unchanged_missing_snapshot');
+      assert.equal(check.consistent, true);
+      assert.equal(check.depsChanged, false);
+      assert.deepEqual(check.differences, []);
+    } finally {
+      cleanup(workdir);
+    }
+  });
+
+  test('deps changed + replay node_modules missing cannot be judged', () => {
+    const workdir = makeTree({ 'package.json': { name: 'fixture' } });
+    try {
+      const check = checkNodeModulesSnapshot(workdir, null, { diffFiles: ['package-lock.json'] });
+      assert.equal(check.status, 'deps_changed_missing_snapshot');
+      assert.equal(check.consistent, null);
+      assert.equal(check.depsChanged, true);
+      assert.equal(check.differences.length, 1);
+      assert.match(check.differences[0], /node_modules: missing/);
+    } finally {
+      cleanup(workdir);
+    }
+  });
+
+  test('zero declared deps + no node_modules is consistent, not missing', () => {
+    // `npm ci` with zero dependencies exits 0 and creates no
+    // node_modules dir (verified 2026-11-11): the absent tree is the
+    // expected tree.
+    const workdir = makeTree({
+      'package.json': { name: 'fixture' },
+      'package-lock.json': lockfile({}),
+    });
+    try {
+      const check = checkNodeModulesSnapshot(workdir, null, { diffFiles: ['src/index.js'] });
+      assert.equal(check.status, 'consistent');
+      assert.equal(check.consistent, true);
+      assert.deepEqual(check.differences, []);
+    } finally {
+      cleanup(workdir);
+    }
+  });
+
+  test('installed tree matching the lockfile is consistent', () => {
+    const workdir = makeTree({
+      'package.json': { name: 'fixture' },
+      'package-lock.json': lockfile({ 'js-yaml': '4.1.0' }),
+      'node_modules/js-yaml/package.json': { name: 'js-yaml', version: '4.1.0' },
+    });
+    try {
+      const check = checkNodeModulesSnapshot(workdir, null, { diffFiles: ['src/index.js'] });
+      assert.equal(check.status, 'consistent');
+      assert.equal(check.consistent, true);
+      assert.deepEqual(check.differences, []);
+    } finally {
+      cleanup(workdir);
+    }
+  });
+
+  test('version drift vs the lockfile names the exact package.json', () => {
+    const workdir = makeTree({
+      'package.json': { name: 'fixture' },
+      'package-lock.json': lockfile({ 'js-yaml': '4.1.0' }),
+      'node_modules/js-yaml/package.json': { name: 'js-yaml', version: '4.1.1' },
+    });
+    try {
+      const check = checkNodeModulesSnapshot(workdir, null, { diffFiles: ['src/index.js'] });
+      assert.equal(check.status, 'inconsistent');
+      assert.equal(check.consistent, false);
+      assert.deepEqual(check.differences, [
+        'node_modules/js-yaml/package.json: version 4.1.1 (replay) vs 4.1.0 (lockfile)',
+      ]);
+    } finally {
+      cleanup(workdir);
+    }
+  });
+
+  test('a lockfile package missing from the replay tree is named exactly', () => {
+    const workdir = makeTree({
+      'package.json': { name: 'fixture' },
+      'package-lock.json': lockfile({ 'js-yaml': '4.1.0' }),
+      'node_modules/other/package.json': { name: 'other', version: '1.0.0' },
+    });
+    try {
+      const check = checkNodeModulesSnapshot(workdir, null, { diffFiles: ['src/index.js'] });
+      assert.equal(check.status, 'inconsistent');
+      assert.deepEqual(check.differences, [
+        'node_modules/js-yaml: missing in replay tree (expected 4.1.0)',
+      ]);
+    } finally {
+      cleanup(workdir);
+    }
+  });
+
+  test('replay tree vs source snapshot drift names the exact file (deps unchanged)', () => {
+    // No lockfile: the source repo's installed tree is the reference.
+    // A version both trees disagree on is a real inconsistency.
+    const workdir = makeTree({
+      'package.json': { name: 'fixture' },
+      'node_modules/js-yaml/package.json': { name: 'js-yaml', version: '4.1.0' },
+    });
+    const source = makeTree({
+      'node_modules/js-yaml/package.json': { name: 'js-yaml', version: '4.1.1' },
+    });
+    try {
+      const check = checkNodeModulesSnapshot(workdir, source, { diffFiles: ['src/index.js'] });
+      assert.equal(check.status, 'inconsistent');
+      assert.deepEqual(check.differences, [
+        'node_modules/js-yaml/package.json: version 4.1.0 (replay) vs 4.1.1 (reference)',
+      ]);
+    } finally {
+      cleanup(workdir, source);
+    }
+  });
+
+  test('no package.json means there is nothing to judge', () => {
+    const workdir = makeTree({ 'README.md': '# fixture\n' });
+    try {
+      const check = checkNodeModulesSnapshot(workdir, null, { diffFiles: [] });
+      assert.equal(check.status, 'no_package_json');
+      assert.equal(check.consistent, null);
+    } finally {
+      cleanup(workdir);
+    }
+  });
+
+  test('compareNodeModulesTrees reports both directions of drift', () => {
+    const a = makeTree({
+      'node_modules/js-yaml/package.json': { name: 'js-yaml', version: '4.1.0' },
+      'node_modules/only-replay/package.json': { name: 'only-replay', version: '1.0.0' },
+    });
+    const b = makeTree({
+      'node_modules/js-yaml/package.json': { name: 'js-yaml', version: '4.1.1' },
+      'node_modules/only-ref/package.json': { name: 'only-ref', version: '2.0.0' },
+    });
+    try {
+      const { differences } = compareNodeModulesTrees(join(a, 'node_modules'), join(b, 'node_modules'));
+      assert.deepEqual(differences, [
+        'node_modules/js-yaml/package.json: version 4.1.0 (replay) vs 4.1.1 (reference)',
+        'node_modules/only-ref: missing in replay tree (expected 2.0.0)',
+        'node_modules/only-replay: only in replay tree (not in reference snapshot)',
+      ]);
+    } finally {
+      cleanup(a, b);
+    }
   });
 });
 
@@ -535,6 +793,110 @@ describe('runAudit end-to-end on a fixture repo', () => {
       assert.equal(report.claims[0].replay.counts.passed, 2);
       assert.equal(report.claims[0].replay.counts.failed, 0);
       assert.equal(report.i6d.applicable, false);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  // --- M6 slice 1 (#132): bun test end-to-end -------------------------
+  // Fixture repo whose tests run under `bun test` (bun:test imports, no
+  // npm deps). The replay really runs bun in the scratch clone.
+  const bunAvailable = () => spawnSync('bun', ['--version'], { encoding: 'utf8' }).status === 0;
+  const bunMissing = () => !bunAvailable() && 'bun is not installed';
+
+  function makeBunFixtureRepo() {
+    const repo = mkdtempSync(join(tmpdir(), 'evalid-audit-bun-'));
+    const git = (args) => {
+      const result = spawnSync('git', args, { cwd: repo, encoding: 'utf8' });
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      return result;
+    };
+    git(['init', '-q']);
+    git(['config', 'user.email', 'audit-fixture@example.test']);
+    git(['config', 'user.name', 'audit-fixture']);
+    writeFileSync(join(repo, 'package.json'), JSON.stringify({ name: 'fixture', version: '1.0.0', type: 'module', scripts: { test: 'bun test' } }, null, 2));
+    writeFileSync(join(repo, 'package-lock.json'), JSON.stringify({ name: 'fixture', lockfileVersion: 3, packages: { '': { name: 'fixture', version: '1.0.0' } } }, null, 2));
+    writeFileSync(join(repo, 'calc.ts'), 'export const add = (a, b) => a + b;\n');
+    mkdirSync(join(repo, 'test'));
+    writeFileSync(join(repo, 'test', 'calc.test.ts'), [
+      'import { test, expect } from "bun:test";',
+      "import { add } from '../calc.ts';",
+      "test('adds', () => { expect(add(1, 2)).toBe(3); });",
+      "test('adds again', () => { expect(add(2, 2)).toBe(4); });",
+      '',
+    ].join('\n'));
+    git(['add', '.']);
+    git(['commit', '-qm', 'base']);
+    return { repo, git };
+  }
+
+  test('verified when a bun test claim replays as claimed', { skip: bunMissing() }, () => {
+    const { repo } = makeBunFixtureRepo();
+    try {
+      const base = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim();
+      const diff = makeDiff(repo, () => {
+        writeFileSync(join(repo, 'calc.ts'), 'export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\n');
+      });
+      const report = runAudit({
+        repoDir: repo,
+        diffText: diff,
+        baseRef: base,
+        claimsText: 'Tests: `bun test` — 2 pass, 0 fail.',
+      });
+      assert.equal(report.verdict, 'verified', JSON.stringify(report, null, 2));
+      assert.equal(report.claims[0].command, 'bun test');
+      assert.equal(report.claims[0].replay.exit, 0);
+      assert.equal(report.claims[0].replay.counts.passed, 2);
+      assert.equal(report.claims[0].replay.counts.failed, 0);
+      assert.equal(report.claims[0].replay.counts.total, 2);
+      // Zero-dep lockfile: the installed tree matches it exactly.
+      assert.equal(report.nodeModules.status, 'consistent');
+      assert.equal(report.nodeModules.consistent, true);
+      assert.deepEqual(report.nodeModules.differences, []);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test('mismatch when a bun test claim overstates the pass count', { skip: bunMissing() }, () => {
+    const { repo } = makeBunFixtureRepo();
+    try {
+      const base = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim();
+      const diff = makeDiff(repo, () => {
+        writeFileSync(join(repo, 'calc.ts'), 'export const add = (a, b) => a + b;\nexport const sub = (a, b) => a - b;\n');
+      });
+      const report = runAudit({
+        repoDir: repo,
+        diffText: diff,
+        baseRef: base,
+        claimsText: 'Tests: `bun test` — 3 pass, 0 fail.',
+      });
+      assert.equal(report.verdict, 'mismatch', JSON.stringify(report, null, 2));
+      assert.equal(report.claims[0].match, false);
+      assert.equal(report.claims[0].note, 'passed count: claimed 3, replayed 2');
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test('mismatch when the bun test actually fails on replay', { skip: bunMissing() }, () => {
+    const { repo } = makeBunFixtureRepo();
+    try {
+      const base = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim();
+      const diff = makeDiff(repo, () => {
+        writeFileSync(join(repo, 'calc.ts'), 'export const add = (a, b) => a - b;\n');
+      });
+      const report = runAudit({
+        repoDir: repo,
+        diffText: diff,
+        baseRef: base,
+        claimsText: 'Tests: `bun test` — 2 pass, 0 fail.',
+      });
+      assert.equal(report.verdict, 'mismatch', JSON.stringify(report, null, 2));
+      assert.equal(report.claims[0].match, false);
+      assert.equal(report.claims[0].replay.exit, 1);
+      assert.equal(report.claims[0].replay.counts.passed, 0);
+      assert.equal(report.claims[0].replay.counts.failed, 2);
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }
