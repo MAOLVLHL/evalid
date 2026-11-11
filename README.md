@@ -245,7 +245,11 @@ executes during the green replay flips the verdict to `mismatch`, even
 when every claimed run replays green. The gate judges pytest assertions by
 tracing the run and node:test assertions by V8 coverage, and merges both
 halves into one verdict. `scripts/demo-i6d-gate.sh` is a
-self-contained red/green demonstration of that gate (M3).
+self-contained red/green demonstration of that gate (M3). Real-case
+evidence for the gate (M3 slice 2, #122: dead-callback asserts on both
+sides, plus a wrong expectation hidden in a dead callback) is in
+`docs/i6d-m3-slice2-cases.md`, reproducible via
+`node --test test/i6d-m3-real-cases.test.js`.
 
 ## Commands
 
