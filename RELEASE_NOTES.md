@@ -1,5 +1,17 @@
 # Release Notes
 
+## 0.5.23 - Milestone M2 "xflow audit" accepted
+
+Patch release. Two merged PRs since 0.5.22, verified end to end in CI and locally — and the milestone they complete is now accepted.
+
+**Milestone M2 "xflow audit" — accepted (issue #69, comment 6785392264; acceptance detail issue #113, comment 6785391440; #113 and #116 closed).** `xflow audit` now works standalone on any diff or PR, not only on runs that went through the evalid workflow: it extracts claimed test runs, replays the seal, and outputs a verdict plus a claim-vs-evidence ledger. Slice 1 (PR #115, merged 2026-11-10T23:33:50Z) adds the positional form `xflow audit <diff|PR>` (bare PR number, `owner/repo#n`, pull URL, `.patch` / `.diff` path, file, or `-` for stdin) plus tamper coverage — an inflated-count claim fails with the exact breaking point, a broken evalid seal fails via i6b replay. Slice 2 (PR #117, merged 2026-11-11T02:40:07Z) fixes G1 and G2, found by auditing real PRs: label-first counts were silently dropped, so a RED claim could be false-verified on exit code alone; and claim-cwd inference is now explicit.
+
+**Acceptance evidence, all verified against raw audit JSONs and code, not worker claims.** Verdicts on 3 real historical PRs, each re-checkable from the audit output alone: code-yeongyu/senpi#2606 (mismatch — re-run exit 0, 82 passed vs claimed 78 stale count), code-yeongyu/senpi#4801 (mismatch — `node --test` single file 4 passed; `npm test` 666/6 with 6 unrelated load-probe failures; `npm run check` exit 134 env crash), code-yeongyu/oh-my-openagent#8014 (mismatch — package scope stripped, plus copied `node_modules` from a November checkout vs a September merge head). No false pass: a tampered claim (99 claimed vs 4 replayed) was reported mismatch with the exact breaking point `passed count: claimed 99, replayed 4`; a bonus forged seal (`demo-tamper/green/0`) was judged `schema_error`. Test evidence: 19 new tests in `test/xflow-audit.test.js` across the two slices (21 → 40); PR #115 CI runs verify 42923478324 and ledger 42923478345 both pass; PR #117 CI runs verify 42946796641 and ledger 42946796750 both pass; full `npm run verify` exit 0 — 63 test files, 0 fail.
+
+Honest note, stated plainly: the three mismatch verdicts rest substantially on replay fidelity, not PR quality — a mismatch means the claim could not be reproduced from the diff alone, not that the PR itself was bad. Known limitations, left for a follow-up slice: G3 (`bun test` not recognised), G4 (`node_modules` snapshot mismatch), prose package-scope hints, and RED / baseline commit scope.
+
+Acceptance ledger, stated plainly: the issue #5 ledger is settled as a conclusion on the MiniMax full-matrix recheck (135/135 complete, 2026-11-10) — P2-1 passed, P1-2 / P1-3 / P2-3 did not pass — so no bench numbers are claimed in this release.
+
 ## 0.5.22 - Milestone M4 "lite fast track" accepted
 
 Patch release. One merged PR since 0.5.21, verified end to end in CI and locally — and the milestone it completes is now accepted.
@@ -12,7 +24,7 @@ Honest note, stated plainly: the literal `xflow proof --track yolo` still exits 
 
 Follow-up filed, not fixed here: the I6b replay tree never contains `node_modules` (issue #111, open) — any test importing an npm dependency reports `no_test_evidence` on replay. The acceptance run worked around it by prefixing the TDD command with `npm ci`; no tool code was changed for this release.
 
-Acceptance debt, stated plainly: the MiniMax full-matrix bench batch (15 instances × 4 arms × reps 3) reached 135/135 complete on 2026-11-10, but the issue #5 acceptance ledger tick-off (P1-2, P1-3, P2-1, P2-3) is still pending — no bench numbers are claimed in this release.
+Acceptance ledger, stated plainly: the issue #5 ledger is settled as a conclusion on the MiniMax full-matrix recheck (135/135 complete, 2026-11-10) — P2-1 passed, P1-2 / P1-3 / P2-3 did not pass — so no bench numbers are claimed in this release.
 
 ## 0.5.21 - Agent progress streaming (external contribution #95)
 
