@@ -3,6 +3,15 @@
 All notable changes to this project are documented here. Detailed notes live in
 [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## [0.5.28] - 2026-11-12
+
+### Added
+- **Milestone M8 "I6b 回放树依赖供给" — accepted (issue #69; acceptance detail issue #143, comment 6803176660; #69 comment 6803179689; #143 / #146 / #111 closed)**: the I6b replay tree now supplies npm dependencies inside the replay tree, so replay can verify test runs that import packages instead of failing with `no_test_evidence`. ① Slice 1 (PR #145, merged 2026-11-11T17:17:19Z, merge commit 79bf656d; verify check on the merge commit success): replay installs the sealed dependencies (`npm ci`, versions as sealed) inside the replay tree. ② Slice 2 (no code change): three real `no_test_evidence` cases re-run on the new code and flipped to real green verdicts, evidence in issue #146, comment 6803005629 — lite-track 22/22, workflow-loader 32/32, cli-usability 68/68, I6b `valid` on all three; the same three cases on the old code (HEAD afd52b3) still fail with `no_test_evidence` (`Cannot find package 'js-yaml'`, tests 1 / pass 0), reproduced in this round; a direct cross-check of the three files gives tests 122 / pass 122 / fail 0, matching the sealed counts 22 + 32 + 68. No-regression: the audit suite re-run on the new code gives 105 tests / 102 pass / 3 fail, and the same 3 failures (I6d audit-pytest cases, `pytest` not on PATH in this VM) occur on the old code too — same names, same cause, a pre-existing environment failure, zero regression. The main round independently reproduced one case (workflow-loader: sealed pass, replay valid, install record `npm ci` / js-yaml 5.5.0) and independently re-ran the audit suite (105 / 102) before accepting.
+
+Honest note, stated plainly: the three cases' new verdicts are all green, 0 red — the three test files themselves genuinely all pass, and replay can now prove that; before this change the three cases could not even be given a red or a green verdict.
+
+Acceptance ledger, stated plainly: the issue #5 ledger is settled as a conclusion on the MiniMax full-matrix recheck (135/135 complete, 2026-11-10) — P2-1 passed, P1-2 / P1-3 / P2-3 did not pass — so no bench numbers are claimed in this release.
+
 ## [0.5.27] - 2026-11-11
 
 ### Added

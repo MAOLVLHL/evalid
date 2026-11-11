@@ -1,5 +1,17 @@
 # Release Notes
 
+## 0.5.28 - Milestone M8 "I6b 回放树依赖供给" accepted
+
+Patch release. One merged PR since 0.5.27, verified end to end in CI and locally — and the milestone it completes is now accepted.
+
+**Milestone M8 "I6b 回放树依赖供给" — accepted (issue #69; acceptance detail issue #143, comment 6803176660; #69 comment 6803179689; #143 / #146 / #111 closed).** The I6b replay tree now supplies npm dependencies inside the replay tree, so replay can verify test runs that import packages instead of failing with `no_test_evidence`. Slice 1 (PR #145, merged 2026-11-11T17:17:19Z, merge commit 79bf656d; verify check on the merge commit success) installs the sealed dependencies (`npm ci`, versions as sealed) inside the replay tree. Slice 2 (no code change) re-ran three real `no_test_evidence` cases on the new code and flipped all three to real green verdicts (evidence in issue #146, comment 6803005629): lite-track 22/22, workflow-loader 32/32, cli-usability 68/68, I6b `valid` on all three; the same three cases on the old code still fail with `no_test_evidence` (`Cannot find package 'js-yaml'`), and a direct cross-check of the three files gives tests 122 / pass 122 / fail 0, matching the sealed counts.
+
+**Acceptance evidence, all measured, not worker claims.** The main round independently reproduced the workflow-loader case (sealed pass, replay valid, install record `npm ci` / js-yaml 5.5.0) and independently re-ran the audit suite on the new code: 105 tests / 102 pass / 3 fail, the 3 failures being the pre-existing I6d audit-pytest cases (`pytest` not on PATH in this VM), which fail identically on the old code — zero regression. The old-code `no_test_evidence` classification for the three cases was verified against the original classification JSONs.
+
+Honest note, stated plainly: the three cases' new verdicts are all green, 0 red — the three test files themselves genuinely all pass, and replay can now prove that; before this change the three cases could not even be given a red or a green verdict.
+
+Acceptance ledger, stated plainly: the issue #5 ledger is settled as a conclusion on the MiniMax full-matrix recheck (135/135 complete, 2026-11-10) — P2-1 passed, P1-2 / P1-3 / P2-3 did not pass — so no bench numbers are claimed in this release.
+
 ## 0.5.27 - Milestone M7 "J1 账本 agent/model 字段落地" accepted
 
 Patch release. One merged PR since 0.5.26, verified end to end in CI and locally — and the milestone it completes is now accepted.
