@@ -649,7 +649,9 @@
       "input_schema": {
         "project_root": "string",
         "change_id": "string",
-        "commands": "string[]"
+        "commands": "string[]",
+        "agent": "string?",
+        "model": "string?"
       }
     },
     "J5.gate.evidence_collect": {

@@ -2,9 +2,30 @@
 """
 J1.tests.run — Run planned verification commands, capture pass/fail proof.
 Reads commands from plan.md (lines starting with ` ``` bash` blocks or --commands arg).
+
+M7 slice 1 (#139): the proof also records which agent/model executed the
+run, so `xflow trend` can group real ledgers by agent/model instead of
+always showing unknown. Resolution order per field (agent, model):
+
+  1. explicit --agent / --model flag — the executor passes its own real
+     identity when it invokes J1;
+  2. EVALID_AGENT / EVALID_MODEL environment variable;
+  3. "unknown" — never invented; blank values count as missing.
+
+`xflow trend` already treats a missing field as unknown, so proofs written
+before M7 keep grouping under unknown without any backfill.
 """
 import sys, os, json, argparse, subprocess, re
 from datetime import datetime, timezone
+
+UNKNOWN = 'unknown'
+
+def resolve_identity(flag_value, env_name):
+    """Resolve one identity field: explicit flag > env var > 'unknown'."""
+    for candidate in (flag_value, os.environ.get(env_name)):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return UNKNOWN
 
 def extract_commands_from_plan(plan_path):
     """Extract bash commands from plan.md code blocks."""
@@ -83,6 +104,8 @@ def main():
     p.add_argument('--project-root', default='.')
     p.add_argument('--change-id', required=True)
     p.add_argument('--commands', nargs='*', help='Explicit commands to run')
+    p.add_argument('--agent', default=None, help='Executing agent identity (e.g. pi, codex); defaults to EVALID_AGENT, else unknown')
+    p.add_argument('--model', default=None, help='Executing model identity (e.g. minimax-m3.1-flash); defaults to EVALID_MODEL, else unknown')
     args = p.parse_args()
 
     commands = args.commands
@@ -112,6 +135,8 @@ def main():
 
     proof = {
         'all_passed': all_passed,
+        'agent': resolve_identity(args.agent, 'EVALID_AGENT'),
+        'model': resolve_identity(args.model, 'EVALID_MODEL'),
         'results': results,
         'recorded_at': datetime.now(timezone.utc).isoformat(),
     }

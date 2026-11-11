@@ -205,6 +205,59 @@ describe('trend ledger collection', () => {
       rmSync(projectRoot, { recursive: true, force: true });
     }
   });
+
+  test('J1-written proofs group by agent/model; legacy proof without fields groups as unknown (M7 slice 1, #139)', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'evalid-trend-j1-'));
+    try {
+      const writePlan = (changeId) => {
+        const dir = resolve(projectRoot, 'specs', 'changes', changeId);
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(resolve(dir, 'plan.md'), [
+          '# Plan',
+          '',
+          '```bash',
+          'node -e "process.exit(0)"',
+          '```',
+          '',
+        ].join('\n'), 'utf8');
+      };
+      const runJ1 = (changeId, args = []) => spawnSync('python3', [
+        'xflow/atoms/j1_tests_run.py',
+        '--project-root',
+        projectRoot,
+        '--change-id',
+        changeId,
+        ...args,
+      ], { cwd: REPO_ROOT, encoding: 'utf8' });
+
+      // New proof: executor identity passed by flags.
+      writePlan('chg-new-pi');
+      assert.equal(runJ1('chg-new-pi', ['--agent', 'pi', '--model', 'm3']).status, 0);
+      writePlan('chg-new-codex');
+      assert.equal(runJ1('chg-new-codex', ['--agent', 'codex', '--model', 'gpt-5']).status, 0);
+      // Legacy proof: written before M7, no agent/model fields at all.
+      writeProof(projectRoot, 'chg-legacy', j1Proof({
+        results: [{ passed: true }, { passed: false }],
+        recordedAt: '2026-11-10T05:00:00.000Z',
+      }));
+
+      const collected = collectTrendRecords(projectRoot);
+      assert.equal(collected.records.length, 3);
+      assert.equal(collected.scanned, 3);
+      assert.equal(collected.skipped, 0);
+      const aggregation = aggregateTrend(collected.records);
+      assert.deepEqual(aggregation.groups.map((group) => [group.agent, group.model]), [
+        ['codex', 'gpt-5'],
+        ['pi', 'm3'],
+        ['unknown', 'unknown'],
+      ]);
+      const legacyGroup = aggregation.groups.find((group) => group.agent === 'unknown');
+      assert.equal(legacyGroup.claimed_passed, 2);
+      assert.equal(legacyGroup.replayed_passed, 1);
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('xflow trend CLI', () => {

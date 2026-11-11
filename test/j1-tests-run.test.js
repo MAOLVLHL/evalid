@@ -75,3 +75,116 @@ describe('J1 tests runner', () => {
     }
   });
 });
+
+describe('J1 agent/model identity (M7 slice 1, #139)', () => {
+  function runJ1(projectRoot, changeId, { args = [], env = {} } = {}) {
+    return spawnSync('python3', [
+      'xflow/atoms/j1_tests_run.py',
+      '--project-root',
+      projectRoot,
+      '--change-id',
+      changeId,
+      ...args,
+    ], {
+      cwd: REPO_ROOT,
+      env: { ...process.env, ...env },
+      encoding: 'utf8',
+    });
+  }
+
+  function seedChange(projectRoot, changeId) {
+    const changeRoot = resolve(projectRoot, 'specs', 'changes', changeId);
+    mkdirSync(changeRoot, { recursive: true });
+    writeFileSync(resolve(changeRoot, 'plan.md'), [
+      '# Plan',
+      '',
+      '```bash',
+      'node -e "process.exit(0)"',
+      '```',
+      '',
+    ].join('\n'), 'utf8');
+    return changeRoot;
+  }
+
+  test('writes explicit --agent/--model flags into verify_proof.json', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'openflow-j1-agent-'));
+    try {
+      const changeRoot = seedChange(projectRoot, 'chg-j1-flags');
+      const result = runJ1(projectRoot, 'chg-j1-flags', {
+        args: ['--agent', 'pi', '--model', 'minimax-m3.1-flash'],
+      });
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      const proof = JSON.parse(readFileSync(resolve(changeRoot, 'verify_proof.json'), 'utf8'));
+      assert.equal(proof.agent, 'pi');
+      assert.equal(proof.model, 'minimax-m3.1-flash');
+      assert.equal(proof.all_passed, true);
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('falls back to EVALID_AGENT/EVALID_MODEL env vars when no flags given', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'openflow-j1-agent-'));
+    try {
+      const changeRoot = seedChange(projectRoot, 'chg-j1-envvars');
+      const result = runJ1(projectRoot, 'chg-j1-envvars', {
+        env: { EVALID_AGENT: 'codex', EVALID_MODEL: 'gpt-5' },
+      });
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      const proof = JSON.parse(readFileSync(resolve(changeRoot, 'verify_proof.json'), 'utf8'));
+      assert.equal(proof.agent, 'codex');
+      assert.equal(proof.model, 'gpt-5');
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('explicit flags win over env vars, per-field', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'openflow-j1-agent-'));
+    try {
+      const changeRoot = seedChange(projectRoot, 'chg-j1-precedence');
+      const result = runJ1(projectRoot, 'chg-j1-precedence', {
+        args: ['--agent', 'pi'],
+        env: { EVALID_AGENT: 'codex', EVALID_MODEL: 'gpt-5' },
+      });
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      const proof = JSON.parse(readFileSync(resolve(changeRoot, 'verify_proof.json'), 'utf8'));
+      assert.equal(proof.agent, 'pi');
+      assert.equal(proof.model, 'gpt-5');
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('missing identity writes unknown, never invents a value; blank values count as missing', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'openflow-j1-agent-'));
+    try {
+      const changeRoot = seedChange(projectRoot, 'chg-j1-unknown');
+      const env = { ...process.env };
+      delete env.EVALID_AGENT;
+      delete env.EVALID_MODEL;
+      const result = spawnSync('python3', [
+        'xflow/atoms/j1_tests_run.py',
+        '--project-root',
+        projectRoot,
+        '--change-id',
+        'chg-j1-unknown',
+      ], { cwd: REPO_ROOT, env, encoding: 'utf8' });
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      let proof = JSON.parse(readFileSync(resolve(changeRoot, 'verify_proof.json'), 'utf8'));
+      assert.equal(proof.agent, 'unknown');
+      assert.equal(proof.model, 'unknown');
+
+      const blank = runJ1(projectRoot, 'chg-j1-unknown', {
+        args: ['--agent', '  ', '--model', ''],
+        env: { EVALID_AGENT: ' ', EVALID_MODEL: '' },
+      });
+      assert.equal(blank.status, 0, blank.stderr || blank.stdout);
+      proof = JSON.parse(readFileSync(resolve(changeRoot, 'verify_proof.json'), 'utf8'));
+      assert.equal(proof.agent, 'unknown');
+      assert.equal(proof.model, 'unknown');
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+});
