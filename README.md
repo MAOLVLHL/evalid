@@ -77,7 +77,10 @@ proofs, skipped tests, weak or wrong assertions, contradictory specs, …) and 1
 
 An LLM reviewer that is explicitly asked to audit an episode, and is allowed to rerun the tests, caught more than evalid's static gates did.
 evalid's gates are deterministic and cost no model calls, but they still miss plausible-but-wrong expected values,
-assertions in callbacks that never run, and behavior changes hidden inside a declared refactor.
+assertions in callbacks that never run, and behavior changes hidden inside a declared refactor. The table above is
+the 0.2.1 benchmark result; since then the I6d assertion-execution gate (M3) closes the callback class -- for
+pytest since #86 and for node:test JS assertions since #120 -- by proving every added/changed assertion really
+executed during the green run. Plausible-but-wrong expected values are still open; real cases land in #119 slice 2.
 ³ 1 of the 11 honest runs timed out and counts as incorrect. LLM arms used 1 run per scenario.
 
 Prompt-based workflows *ask* an agent to write the failing test first, run the suite and keep notes. evalid
@@ -234,11 +237,14 @@ claims found in the supplied text), `unverifiable` (a claimed command
 could not run). Exit codes are 0 / 1 / 3 / 1 respectively (2 = misuse).
 `--json` prints the machine-readable report; `--out <file>` writes it.
 
-When the diff touches Python test files and the audited repo carries the
-I6d plugin (`xflow/atoms/i6d_assertion_execution.py`), the audit also runs
+When the diff touches Python or JS test files and the audited repo carries the
+I6d plugin (`xflow/atoms/i6d_assertion_execution.py`, JS half in
+`i6d_assertion_execution_js.js` next to it), the audit also runs
 the assertion-execution gate: an added or changed assertion that never
 executes during the green replay flips the verdict to `mismatch`, even
-when every claimed run replays green. `scripts/demo-i6d-gate.sh` is a
+when every claimed run replays green. The gate judges pytest assertions by
+tracing the run and node:test assertions by V8 coverage, and merges both
+halves into one verdict. `scripts/demo-i6d-gate.sh` is a
 self-contained red/green demonstration of that gate (M3).
 
 ## Commands

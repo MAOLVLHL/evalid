@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 
 import {
   extractClaims,
+  isJavaScriptTestFile,
   isPythonTestFile,
   parseAuditTarget,
   parseClaimCounts,
@@ -854,6 +855,137 @@ describe('runAudit with the I6d assertion-execution gate (M3 slice 3)', () => {
       assert.equal(report.verdict, 'verified', JSON.stringify(report, null, 2));
       assert.equal(report.i6d.applicable, false);
       assert.equal(report.i6d.reason, 'disabled');
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  // --- M3 slice 1 (#120): the JS half of the I6d gate ---------------
+
+  const JS_BASE = [
+    "import { test } from 'node:test';",
+    "import assert from 'node:assert/strict';",
+    '',
+    "test('normal', () => {",
+    '  assert.equal(1 + 1, 2);',
+    '});',
+  ].join('\n');
+
+  const JS_DEAD = [
+    "import { test } from 'node:test';",
+    "import assert from 'node:assert/strict';",
+    '',
+    "test('callback never runs', () => {",
+    '  function onDone(value) {',
+    '    assert.equal(value, 42);',
+    '  }',
+    '  // onDone is defined but never called.',
+    '  assert.ok(true);',
+    '});',
+    '',
+    "test('normal', () => {",
+    '  assert.equal(1 + 1, 2);',
+    '});',
+  ].join('\n');
+
+  const JS_GREEN = [
+    "import { test } from 'node:test';",
+    "import assert from 'node:assert/strict';",
+    '',
+    "test('normal', () => {",
+    '  assert.equal(1 + 1, 2);',
+    '});',
+    '',
+    "test('new ok', () => {",
+    '  assert.equal(2 + 2, 4);',
+    '});',
+  ].join('\n');
+
+  // Fixture repo that carries both I6d halves (copied from this repo) and
+  // one committed JS test file. The diff under audit adds to it. No
+  // pytest is needed: a JS-only diff is judged by the node half alone.
+  function makeJsFixtureRepo() {
+    const repo = mkdtempSync(join(tmpdir(), 'evalid-audit-i6d-js-'));
+    const git = (args) => {
+      const result = spawnSync('git', args, { cwd: repo, encoding: 'utf8' });
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      return result;
+    };
+    git(['init', '-q', '-b', 'main']);
+    git(['config', 'user.email', 'audit-fixture@example.test']);
+    git(['config', 'user.name', 'audit-fixture']);
+    mkdirSync(join(repo, 'xflow', 'atoms'), { recursive: true });
+    copyFileSync(
+      join(repoRoot, 'xflow', 'atoms', 'i6d_assertion_execution.py'),
+      join(repo, 'xflow', 'atoms', 'i6d_assertion_execution.py'),
+    );
+    copyFileSync(
+      join(repoRoot, 'xflow', 'atoms', 'i6d_assertion_execution_js.js'),
+      join(repo, 'xflow', 'atoms', 'i6d_assertion_execution_js.js'),
+    );
+    writeFileSync(join(repo, 'test_dead.test.js'), JS_BASE);
+    git(['add', '.']);
+    git(['commit', '-qm', 'base']);
+    return { repo, git };
+  }
+
+  test('isJavaScriptTestFile matches node:test default collection names', () => {
+    assert.equal(isJavaScriptTestFile('test_calc.test.js'), true);
+    assert.equal(isJavaScriptTestFile('test/test_calc.test.mjs'), true);
+    assert.equal(isJavaScriptTestFile('test-calc.js'), true);
+    assert.equal(isJavaScriptTestFile('src/calc.js'), false);
+    assert.equal(isJavaScriptTestFile('test_calc.js'), false);
+    assert.equal(isJavaScriptTestFile('test_calc.test.py'), false);
+  });
+
+  test('mismatch when the replay is green but an in-diff JS assert never executed', () => {
+    const { repo } = makeJsFixtureRepo();
+    try {
+      const base = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim();
+      const diff = makeDiff(repo, () => {
+        writeFileSync(join(repo, 'test_dead.test.js'), JS_DEAD);
+      });
+      const report = runAudit({
+        repoDir: repo,
+        diffText: diff,
+        baseRef: base,
+        claimsText: 'Tests: `node --test test_dead.test.js` — 2 tests, all pass.',
+        python,
+      });
+      // The claimed node run really passes on replay -- the gate, not
+      // the replay, is what flips this to mismatch.
+      assert.equal(report.claims[0].match, true, JSON.stringify(report, null, 2));
+      assert.equal(report.i6d.applicable, true);
+      assert.equal(report.i6d.verdict, 'unexecuted_assertions');
+      assert.equal(report.i6d.unexecuted.length, 1);
+      assert.equal(report.i6d.unexecuted[0].line, 6);
+      assert.match(report.i6d.unexecuted[0].source, /assert\.equal\(value, 42\)/);
+      assert.equal(report.verdict, 'mismatch', JSON.stringify(report, null, 2));
+      assert.equal(report.exitCode, 1);
+      assert.equal(report.ok, false);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test('verified when the JS diff adds only executed assertions', () => {
+    const { repo } = makeJsFixtureRepo();
+    try {
+      const base = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim();
+      const diff = makeDiff(repo, () => {
+        writeFileSync(join(repo, 'test_dead.test.js'), JS_GREEN);
+      });
+      const report = runAudit({
+        repoDir: repo,
+        diffText: diff,
+        baseRef: base,
+        claimsText: 'Tests: `node --test test_dead.test.js` — 2 tests, all pass.',
+        python,
+      });
+      assert.equal(report.verdict, 'verified', JSON.stringify(report, null, 2));
+      assert.equal(report.i6d.applicable, true);
+      assert.equal(report.i6d.verdict, 'pass');
+      assert.deepEqual(report.i6d.unexecuted, []);
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }

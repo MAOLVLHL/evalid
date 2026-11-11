@@ -242,7 +242,7 @@
       "track": "lite",
       "type": "python",
       "script": "xflow/atoms/i6d_assertion_execution.py",
-      "description": "Prove every new/changed pytest assertion really executed during the green run (M3 slice 3). Runs after I6b and before I6c, so I6c can fold its verdict into quality-0.json.",
+      "description": "Prove every new/changed assertion really executed during the green run -- pytest via the plugin, node:test via V8 coverage (M3 slice 1, #120). Runs after I6b and before I6c, so I6c can fold its verdict into quality-0.json.",
       "input_schema": {
         "project_root": "string",
         "change_id": "string",

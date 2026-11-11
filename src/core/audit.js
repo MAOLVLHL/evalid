@@ -73,6 +73,17 @@ export function isPythonTestFile(path) {
 }
 
 /**
+ * JS files node --test collects as tests by default
+ * (*.test.{js,mjs,cjs} / test-*.{js,mjs,cjs}). Kept in sync with
+ * is_javascript_test_file in xflow/atoms/i6d_assertion_execution.py
+ * and isJavaScriptTestFile in i6d_assertion_execution_js.js (M3 #120).
+ */
+export function isJavaScriptTestFile(path) {
+  const name = String(path || '').split('/').pop();
+  return /\.test\.(js|mjs|cjs)$/.test(name) || /^test-.*\.(js|mjs|cjs)$/.test(name);
+}
+
+/**
  * Run the I6d assertion-execution gate in an audit scratch clone.
  * Scope comes from the audit's diff text (--diff-file in the I6d CLI),
  * so uncommitted diffs work without committing anything.
@@ -97,17 +108,24 @@ export function runI6dCheck(workdir, options = {}) {
   }
   const { files } = parseDiffFiles(diffText);
   const changedPyTests = files.filter(isPythonTestFile);
+  const changedJsTests = files.filter(isJavaScriptTestFile);
   const hasPytestClaim = claims.some((claim) => /\bpytest\b/.test(claim.command || ''));
-  if (changedPyTests.length === 0 && !hasPytestClaim) {
+  const hasNodeTestClaim = claims.some((claim) => /(\bnode\b[^\n]*\b--test\b|\bnpm\b[^\n]*\btest\b)/.test(claim.command || ''));
+  if (changedPyTests.length === 0 && changedJsTests.length === 0 && !hasPytestClaim && !hasNodeTestClaim) {
     return { applicable: false, reason: 'no_python_test_changes' };
   }
   const targets = changedPyTests.filter((file) => existsSync(join(workdir, file)));
-  if (targets.length === 0 && !hasPytestClaim) {
+  if (targets.length === 0 && changedJsTests.length === 0 && !hasPytestClaim && !hasNodeTestClaim) {
     return { applicable: false, reason: 'no_python_test_changes' };
   }
-  const pytestCheck = spawnSync(python, ['-c', 'import pytest'], { cwd: workdir, encoding: 'utf8', timeout: 60000 });
-  if (pytestCheck.status !== 0) {
-    return { applicable: false, reason: 'pytest_unavailable' };
+  // pytest is only required when the Python half has something to judge;
+  // a JS-only diff is judged by the node half without it (M3 #120).
+  const needsPytest = targets.length > 0 || hasPytestClaim;
+  if (needsPytest) {
+    const pytestCheck = spawnSync(python, ['-c', 'import pytest'], { cwd: workdir, encoding: 'utf8', timeout: 60000 });
+    if (pytestCheck.status !== 0) {
+      return { applicable: false, reason: 'pytest_unavailable' };
+    }
   }
   const scratch = mkdtempSync(join(tmpdir(), 'evalid-audit-i6d-'));
   try {

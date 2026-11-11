@@ -355,7 +355,9 @@ def main() -> None:
     # I6d atom ran first and wrote i6d-0.json. An assertion that never
     # executed during the green run must fail the quality gate, even when
     # the run itself was green. No i6d-0.json means I6d did not run (no
-    # Python test changes): behaviour is unchanged, no finding added.
+    # Python/JS test changes): behaviour is unchanged, no finding added.
+    # M3 slice 1 (#120): the evidence now merges the pytest and node:test
+    # halves; a missing runtime on either side fails the same way.
     i6d_evidence = read_json(proof_dir / "i6d-0.json")
     i6d_summary = None
     if i6d_evidence:
@@ -365,6 +367,7 @@ def main() -> None:
             "total": i6d_evidence.get("total"),
             "unexecuted": len(i6d_evidence.get("unexecuted") or []),
             "skipped": len(i6d_evidence.get("skipped") or []),
+            "languages": i6d_evidence.get("languages"),
         }
         if i6d_evidence.get("verdict") == "unexecuted_assertions":
             for entry in i6d_evidence.get("unexecuted") or []:
@@ -386,6 +389,15 @@ def main() -> None:
                 "pytest is unavailable, so added/changed assertions could "
                 "not be proven executed.",
                 "assertions_at_stake": i6d_evidence.get("total"),
+            })
+        elif i6d_evidence.get("verdict") == "node_unavailable":
+            findings.append({
+                "severity": "fail",
+                "code": "i6d_node_unavailable",
+                "message": "The I6d assertion-execution gate could not run: "
+                "node is unavailable, so added/changed JS assertions could "
+                "not be proven executed.",
+                "js_test_files": i6d_evidence.get("jsTestFiles"),
             })
 
     failed = any(finding.get("severity") == "fail" for finding in findings)

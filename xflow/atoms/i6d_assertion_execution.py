@@ -19,9 +19,23 @@ Use as a pytest plugin (``-p i6d_assertion_execution``) or through the CLI
 below, which runs pytest for you and exits 0 on pass, 1 when unexecuted
 assertions (or a failing pytest run) are found, 2 on misuse/errors.
 
-Out of scope for slice 1 (later slices): scoping to added/changed asserts
-only (needs git diff), asserts in non-test helper modules, non-pytest
-runners, and wiring into ``xflow audit`` replay / the I6c gate.
+Out of scope for slice 1 (later slices): asserts in non-test helper
+modules and non-pytest runners. Slice 2 added the diff scoping, slice 3
+the audit / I6c wiring.
+
+M3 slice 1 (#120, new milestone #119) adds the JavaScript half: the
+pytest gate above silently passed a change that only touched JS tests,
+so a never-called callback assert in a node:test file counted as green.
+The JS half lives in ``i6d_assertion_execution_js.js`` next to this file
+(static ``assert`` collection + V8 coverage execution proof); this CLI
+orchestrates both halves and merges them into one evidence file with
+merged totals and a per-language breakdown under ``languages``
+(``python`` / ``javascript``). A side with no test files in scope is
+skipped, not run whole-root, except the CLI's empty-diff fallback, which
+runs both suites whole-root (the pinned slice-2 contract). The merged
+verdict is the worst of the two sides: ``unexecuted_assertions`` beats
+a failed run, which beats an unavailable runtime; ``diff_error`` /
+``i6d_error`` short-circuit to exit 2.
 
 Slice 2 adds that diff scoping as reusable pieces (importable, so slice 3
 can reuse them when it wires the gate into ``xflow audit`` replay):
@@ -62,8 +76,10 @@ import ast
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 EVIDENCE_ENV = "EVALID_I6D_EVIDENCE"
@@ -71,7 +87,7 @@ DIFF_ONLY_ENV = "EVALID_I6D_ONLY_CHANGED"
 DIFF_BASE_ENV = "EVALID_I6D_DIFF_BASE"
 DIFF_FILE_ENV = "EVALID_I6D_DIFF_FILE"
 INCLUDE_UNCOMMITTED_ENV = "EVALID_I6D_INCLUDE_UNCOMMITTED"
-VERSION = 3
+VERSION = 4
 
 
 def is_python_test_file(path):
@@ -85,6 +101,203 @@ def is_python_test_file(path):
     return name.endswith(".py") and (
         name.startswith("test_") or name.endswith("_test.py")
     )
+
+
+def is_javascript_test_file(path):
+    """True for files node --test collects as tests by default.
+
+    Mirrors node:test's default globs (``*.test.{js,mjs,cjs}`` /
+    ``test-*.{js,mjs,cjs}``); kept in sync with
+    ``isJavaScriptTestFile`` in ``i6d_assertion_execution_js.js`` and
+    ``src/core/audit.js``.
+    """
+    name = os.path.basename(str(path))
+    return (
+        re.match(r"^.*\.test\.(js|mjs|cjs)$", name) is not None
+        or re.match(r"^test-.*\.(js|mjs|cjs)$", name) is not None
+    )
+
+
+# ---------------------------------------------------------------------------
+# JavaScript half (M3 slice 1, #120): run the node gate as a subprocess
+# and merge its evidence with the pytest half's.
+# ---------------------------------------------------------------------------
+
+JS_MODULE_NAME = "i6d_assertion_execution_js.js"
+
+
+def _side_summary(evidence, exit_key):
+    return {
+        "verdict": evidence.get("verdict"),
+        "total": evidence.get("total", 0),
+        "executed": evidence.get("executed", 0),
+        "unexecuted": len(evidence.get("unexecuted", [])),
+        "skipped": len(evidence.get("skipped", [])),
+        "outOfScope": len(evidence.get("outOfScope", []))
+        if "outOfScope" in evidence else None,
+        exit_key: evidence.get(exit_key),
+    }
+
+
+def _skipped_side_evidence(tool, version, root, exit_key, diff_base, diff_source, scoped):
+    """A pass-with-zero-totals evidence for a side with nothing in scope."""
+    evidence = {
+        "tool": tool,
+        "version": version,
+        "root": root,
+        exit_key: None,
+        "verdict": "pass",
+        "total": 0,
+        "executed": 0,
+        "unexecuted": [],
+        "skipped": [],
+    }
+    if scoped:
+        evidence["diffBase"] = diff_base
+        evidence["diffSource"] = diff_source
+        evidence["inScope"] = 0
+        evidence["outOfScope"] = []
+    return evidence
+
+
+def _run_js_half(*, root, js_targets, only_changed, diff_base, diff_file,
+                 include_uncommitted, diff_base_out, diff_source):
+    """Run the JS gate; return (evidence, node_exit, ran).
+
+    ``js_targets`` is None for whole-root discovery, else the list of
+    (relative) JS test files to judge. When node or the JS module is
+    missing, the verdict is ``node_unavailable`` / ``i6d_error`` with the
+    files at stake named -- never a silent pass.
+    """
+    scoped = only_changed
+    js_module = str(Path(__file__).resolve().parent / JS_MODULE_NAME)
+    if not os.path.exists(js_module):
+        evidence = _skipped_side_evidence(
+            "i6d_assertion_execution_js", 1, root, "nodeExit",
+            diff_base_out, diff_source, scoped,
+        )
+        evidence["verdict"] = "i6d_error"
+        evidence["error"] = f"JS gate module missing: {js_module}"
+        return evidence, None, True
+    node_bin = shutil.which("node")
+    if node_bin is None:
+        evidence = _skipped_side_evidence(
+            "i6d_assertion_execution_js", 1, root, "nodeExit",
+            diff_base_out, diff_source, scoped,
+        )
+        evidence["verdict"] = "node_unavailable"
+        evidence["jsTestFiles"] = sorted(
+            os.path.relpath(t, root) if os.path.isabs(t) else t
+            for t in (js_targets or [])
+        )
+        return evidence, None, True
+    tmpdir = tempfile.mkdtemp(prefix="evalid-i6d-js-")
+    try:
+        js_output = os.path.join(tmpdir, "i6d-js-evidence.json")
+        command = [node_bin, js_module, "--root", root, "--output", js_output]
+        if only_changed:
+            command.append("--only-changed")
+            command.extend(["--diff-base", diff_base])
+            if diff_file is not None:
+                command.extend(["--diff-file", os.path.abspath(diff_file)])
+            if include_uncommitted:
+                command.append("--include-uncommitted")
+        if js_targets:
+            command.append("--")
+            command.extend(js_targets)
+        try:
+            proc = subprocess.run(
+                command, cwd=root, capture_output=True, text=True, timeout=600,
+            )
+        except OSError as exc:
+            evidence = _skipped_side_evidence(
+                "i6d_assertion_execution_js", 1, root, "nodeExit",
+                diff_base_out, diff_source, scoped,
+            )
+            evidence["verdict"] = "i6d_error"
+            evidence["error"] = f"could not run node gate: {exc}"
+            return evidence, None, True
+        try:
+            with open(js_output, encoding="utf-8") as handle:
+                evidence = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            evidence = _skipped_side_evidence(
+                "i6d_assertion_execution_js", 1, root, "nodeExit",
+                diff_base_out, diff_source, scoped,
+            )
+            evidence["verdict"] = "i6d_error"
+            evidence["error"] = (
+                f"JS gate wrote no evidence ({exc}); node exit "
+                f"{proc.returncode}; output tail: "
+                f"{((proc.stdout or '') + (proc.stderr or ''))[-500:]}"
+            )
+            return evidence, proc.returncode, True
+        return evidence, proc.returncode, True
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _merge_evidence(py_evidence, js_evidence, *, root, diff_base_out, diff_source):
+    """Merge the two halves into one i6d evidence file.
+
+    Totals and lists add up; the verdict is the worst of the two sides
+    (unexecuted > unavailable > failed > pass); per-language summaries
+    land under ``languages`` so I6c and the audit keep working off the
+    merged top-level fields.
+    """
+    py_verdict = py_evidence.get("verdict")
+    js_verdict = js_evidence.get("verdict")
+    if "unexecuted_assertions" in (py_verdict, js_verdict):
+        verdict = "unexecuted_assertions"
+    elif "pytest_unavailable" in (py_verdict, js_verdict):
+        verdict = "pytest_unavailable"
+    elif "node_unavailable" in (py_verdict, js_verdict):
+        verdict = "node_unavailable"
+    elif "diff_error" in (py_verdict, js_verdict):
+        verdict = "diff_error"
+    elif "i6d_error" in (py_verdict, js_verdict):
+        verdict = "i6d_error"
+    elif "pytest_failed" in (py_verdict, js_verdict):
+        verdict = "pytest_failed"
+    elif "js_test_failed" in (py_verdict, js_verdict):
+        verdict = "js_test_failed"
+    else:
+        verdict = "pass"
+    evidence = {
+        "tool": "i6d_assertion_execution",
+        "version": VERSION,
+        "root": root,
+        "pytestExit": py_evidence.get("pytestExit"),
+        "nodeExit": js_evidence.get("nodeExit"),
+        "verdict": verdict,
+        "total": py_evidence.get("total", 0) + js_evidence.get("total", 0),
+        "executed": py_evidence.get("executed", 0) + js_evidence.get("executed", 0),
+        "unexecuted": list(py_evidence.get("unexecuted", [])) + list(js_evidence.get("unexecuted", [])),
+        "skipped": list(py_evidence.get("skipped", [])) + list(js_evidence.get("skipped", [])),
+        "languages": {
+            "python": _side_summary(py_evidence, "pytestExit"),
+            "javascript": _side_summary(js_evidence, "nodeExit"),
+        },
+    }
+    if "outOfScope" in py_evidence or "outOfScope" in js_evidence:
+        evidence["outOfScope"] = (
+            list(py_evidence.get("outOfScope", [])) + list(js_evidence.get("outOfScope", []))
+        )
+    if "inScope" in py_evidence or "inScope" in js_evidence:
+        evidence["inScope"] = (py_evidence.get("inScope") or 0) + (js_evidence.get("inScope") or 0)
+    if diff_base_out is not None:
+        evidence["diffBase"] = diff_base_out
+    if diff_source is not None:
+        evidence["diffSource"] = diff_source
+    for key in ("diffError", "error"):
+        for side in (py_evidence, js_evidence):
+            if side.get(key) is not None:
+                evidence[key] = side[key]
+                break
+    if js_evidence.get("jsTestFiles") is not None:
+        evidence["jsTestFiles"] = js_evidence["jsTestFiles"]
+    return evidence
+
 
 
 # ---------------------------------------------------------------------------
@@ -468,8 +681,17 @@ def _pytest_available(pytest_python):
     return proc.returncode == 0
 
 
-def _atom_summary(*, ok, verdict, proof_file, evidence, pytest_exit):
-    return {
+def _exit_for_verdict(verdict):
+    """CLI/atom exit code for a merged verdict: 0 pass, 1 gate red,
+    2 the gate itself could not judge (diff / runtime / wiring error)."""
+    if verdict in ("diff_error", "i6d_error", "pytest_unavailable", "node_unavailable"):
+        return 2
+    return 0 if verdict == "pass" else 1
+
+
+def _atom_summary(*, ok, verdict, proof_file, evidence, pytest_exit,
+                  node_exit=None, languages=None):
+    summary = {
         "ok": ok,
         "verdict": verdict,
         "proof_file": str(proof_file),
@@ -479,6 +701,11 @@ def _atom_summary(*, ok, verdict, proof_file, evidence, pytest_exit):
         "skipped": len(evidence.get("skipped", [])),
         "pytest_exit": pytest_exit,
     }
+    if node_exit is not None or languages is not None:
+        summary["node_exit"] = node_exit
+    if languages is not None:
+        summary["languages"] = languages
+    return summary
 
 
 def run_gate(*, root, output, pytest_python, pytest_args,
@@ -529,25 +756,47 @@ def run_gate(*, root, output, pytest_python, pytest_args,
         except Exception as exc:  # noqa: BLE001 - surface as evidence, not a crash
             diff_error = str(exc)
 
-    targets = []
-    if only_changed and changed is not None and not pytest_args:
-        targets = sorted(
+    # Resolve per-side targets from the scope. Explicit pytest_args (the
+    # audit's case) go to pytest as-is; the JS half always scopes from
+    # the diff itself, so a JS-only change is judged even when the audit
+    # passed only Python targets.
+    py_scoped = []
+    js_scoped = []
+    if only_changed and changed is not None:
+        py_scoped = sorted(
             os.path.relpath(path, root)
             for path, lines in changed.items()
             if is_python_test_file(path) and lines
             and os.path.exists(path)
         )
-        pytest_args = targets
+        js_scoped = sorted(
+            os.path.relpath(path, root)
+            for path, lines in changed.items()
+            if is_javascript_test_file(path) and lines
+            and os.path.exists(path)
+        )
+    if pytest_args:
+        py_args = list(pytest_args)
+        js_targets = [a for a in pytest_args if is_javascript_test_file(a)] or js_scoped
+    elif only_changed:
+        py_args = py_scoped
+        js_targets = js_scoped
+    else:
+        py_args = []
+        js_targets = None  # whole-root discovery by the JS gate
+    py_has = bool(py_args)
+    js_has = bool(js_targets)
 
-    if atom_mode and only_changed and not pytest_args and diff_error is None:
-        # No changed Python test files: nothing for the gate to judge.
-        # Slice 2's empty-diff contract is "pass", so the atom passes
-        # without running pytest at all.
+    if atom_mode and only_changed and not py_has and not js_has and diff_error is None:
+        # No changed Python or JS test files: nothing for the gate to
+        # judge. Slice 2's empty-diff contract is "pass", so the atom
+        # passes without running either suite.
         evidence = {
             "tool": "i6d_assertion_execution",
             "version": VERSION,
             "root": root,
             "pytestExit": None,
+            "nodeExit": None,
             "verdict": "pass",
             "total": 0,
             "executed": 0,
@@ -558,14 +807,32 @@ def run_gate(*, root, output, pytest_python, pytest_args,
             "inScope": 0,
             "outOfScope": [],
             "notApplicable": "no_python_test_changes",
+            "languages": {
+                "python": _side_summary(
+                    _skipped_side_evidence("i6d_assertion_execution", VERSION, root,
+                                           "pytestExit", diff_base_out, diff_source, True),
+                    "pytestExit"),
+                "javascript": _side_summary(
+                    _skipped_side_evidence("i6d_assertion_execution_js", 1, root,
+                                           "nodeExit", diff_base_out, diff_source, True),
+                    "nodeExit"),
+            },
         }
         with open(output, "w", encoding="utf-8") as handle:
             json.dump(evidence, handle, indent=2)
         print(json.dumps(_atom_summary(
             ok=True, verdict="pass", proof_file=output,
             evidence=evidence, pytest_exit=None,
+            languages=evidence["languages"],
         )))
         return 0
+
+    # A side with targets runs; a side with none is skipped when the
+    # other side has targets. When neither side has targets (CLI
+    # empty-diff fallback -- the atom short-circuited above), both run
+    # whole-root: the pinned slice-2 contract.
+    py_run = py_has or not js_has
+    js_run = js_has or not py_has
 
     if diff_error is not None:
         evidence = {
@@ -593,103 +860,153 @@ def run_gate(*, root, output, pytest_python, pytest_args,
             print(f"i6d: diff_error: {diff_error}", file=sys.stderr)
         return 2
 
-    atoms_dir = str(Path(__file__).resolve().parent)
-    env = dict(os.environ)
-    env[EVIDENCE_ENV] = output
-    if only_changed:
-        env[DIFF_ONLY_ENV] = "1"
-        env[DIFF_BASE_ENV] = diff_base
-        if diff_file is not None:
-            env[DIFF_FILE_ENV] = os.path.abspath(diff_file)
-        if include_uncommitted:
-            env[INCLUDE_UNCOMMITTED_ENV] = "1"
-    env["PYTHONPATH"] = atoms_dir + os.pathsep + env.get("PYTHONPATH", "")
+    # --- Python half ---------------------------------------------------
+    # The plugin writes its evidence to EVIDENCE_ENV; point it at a
+    # scratch file -- the merged evidence goes to `output` below.
+    py_tmpdir = tempfile.mkdtemp(prefix="evalid-i6d-py-")
+    try:
+        py_evidence_path = os.path.join(py_tmpdir, "i6d-py-evidence.json")
+        if py_run:
+            atoms_dir = str(Path(__file__).resolve().parent)
+            env = dict(os.environ)
+            env[EVIDENCE_ENV] = py_evidence_path
+            if only_changed:
+                env[DIFF_ONLY_ENV] = "1"
+                env[DIFF_BASE_ENV] = diff_base
+                if diff_file is not None:
+                    env[DIFF_FILE_ENV] = os.path.abspath(diff_file)
+                if include_uncommitted:
+                    env[INCLUDE_UNCOMMITTED_ENV] = "1"
+            env["PYTHONPATH"] = atoms_dir + os.pathsep + env.get("PYTHONPATH", "")
 
-    if not _pytest_available(pytest_python):
-        # The gate cannot judge anything without pytest. When the diff
-        # touches Python test files this is a real gap (exit 2), not a
-        # silent pass; statically count the asserts at stake for the
-        # evidence so the failure names what could not be judged.
-        total = 0
-        for target in (pytest_args or []):
-            candidate = target if os.path.isabs(target) else os.path.join(root, target)
-            if is_python_test_file(candidate) and os.path.exists(candidate):
+            if not _pytest_available(pytest_python):
+                # The gate cannot judge anything without pytest. When the diff
+                # touches Python test files this is a real gap (exit 2), not a
+                # silent pass; statically count the asserts at stake for the
+                # evidence so the failure names what could not be judged.
+                total = 0
+                for target in (py_args or []):
+                    candidate = target if os.path.isabs(target) else os.path.join(root, target)
+                    if is_python_test_file(candidate) and os.path.exists(candidate):
+                        try:
+                            total += len(collect_assertions(candidate))
+                        except Exception:  # noqa: BLE001 - best effort only
+                            pass
+                py_evidence = {
+                    "tool": "i6d_assertion_execution",
+                    "version": VERSION,
+                    "root": root,
+                    "pytestExit": None,
+                    "verdict": "pytest_unavailable",
+                    "total": total,
+                    "executed": 0,
+                    "unexecuted": [],
+                    "skipped": [],
+                    "diffBase": diff_base_out,
+                    "diffSource": diff_source,
+                    "inScope": total if only_changed else None,
+                    "outOfScope": [],
+                }
+                py_exit = None
+            else:
+                command = [pytest_python, "-m", "pytest", "-p", "i6d_assertion_execution", *py_args]
                 try:
-                    total += len(collect_assertions(candidate))
-                except Exception:  # noqa: BLE001 - best effort only
-                    pass
-        evidence = {
-            "tool": "i6d_assertion_execution",
-            "version": VERSION,
-            "root": root,
-            "pytestExit": None,
-            "verdict": "pytest_unavailable",
-            "total": total,
-            "executed": 0,
-            "unexecuted": [],
-            "skipped": [],
-            "diffBase": diff_base_out,
-            "diffSource": diff_source,
-            "inScope": total if only_changed else None,
-            "outOfScope": [],
-        }
-        with open(output, "w", encoding="utf-8") as handle:
-            json.dump(evidence, handle, indent=2)
-        if atom_mode:
-            print(json.dumps(_atom_summary(
-                ok=False, verdict="pytest_unavailable", proof_file=output,
-                evidence=evidence, pytest_exit=None,
-            )))
+                    # Atom mode: the workflow executor parses stdout as one JSON line,
+                    # so pytest's own session output must not leak onto stdout. Capture
+                    # it; the evidence JSON carries the verdict, and the tail is only
+                    # surfaced when no evidence was written.
+                    if atom_mode:
+                        proc = subprocess.run(command, cwd=root, env=env,
+                                              capture_output=True, text=True)
+                    else:
+                        proc = subprocess.run(command, cwd=root, env=env)
+                except OSError as exc:
+                    py_evidence = _skipped_side_evidence(
+                        "i6d_assertion_execution", VERSION, root, "pytestExit",
+                        diff_base_out, diff_source, only_changed,
+                    )
+                    py_evidence["verdict"] = "i6d_error"
+                    py_evidence["error"] = f"could not run pytest: {exc}"
+                    py_exit = None
+                else:
+                    try:
+                        with open(py_evidence_path, encoding="utf-8") as handle:
+                            py_evidence = json.load(handle)
+                    except (OSError, json.JSONDecodeError) as exc:
+                        detail = f"pytest exit {proc.returncode}"
+                        if atom_mode and getattr(proc, "stdout", None):
+                            detail += f"; pytest output tail: {(proc.stdout or '')[-500:]}"
+                        print(f"i6d: no evidence written ({exc}); {detail}", file=sys.stderr)
+                        py_evidence = _skipped_side_evidence(
+                            "i6d_assertion_execution", VERSION, root, "pytestExit",
+                            diff_base_out, diff_source, only_changed,
+                        )
+                        py_evidence["verdict"] = "i6d_error"
+                        py_evidence["error"] = f"pytest wrote no evidence ({exc}); {detail}"
+                        py_exit = proc.returncode
+                    else:
+                        py_evidence["pytestExit"] = proc.returncode
+                        if diff_source is not None:
+                            py_evidence["diffSource"] = diff_source
+                        if py_evidence["verdict"] == "unexecuted_assertions" and proc.returncode == 0:
+                            pass  # verdict already reflects the gate; pytest itself passed.
+                        elif proc.returncode != 0 and not py_evidence["unexecuted"]:
+                            py_evidence["verdict"] = "pytest_failed"
+                        py_exit = proc.returncode
         else:
-            print("i6d: pytest_unavailable: "
-                  f"{pytest_python} cannot import pytest", file=sys.stderr)
-        return 2
+            py_evidence = _skipped_side_evidence(
+                "i6d_assertion_execution", VERSION, root, "pytestExit",
+                diff_base_out, diff_source, only_changed,
+            )
+            py_exit = None
 
-    command = [pytest_python, "-m", "pytest", "-p", "i6d_assertion_execution", *pytest_args]
-    try:
-        # Atom mode: the workflow executor parses stdout as one JSON line,
-        # so pytest's own session output must not leak onto stdout. Capture
-        # it; the evidence JSON carries the verdict, and the tail is only
-        # surfaced when no evidence was written.
-        if atom_mode:
-            proc = subprocess.run(command, cwd=root, env=env,
-                                  capture_output=True, text=True)
+        # --- JavaScript half -------------------------------------------
+        if js_run:
+            js_evidence, js_exit, _ran = _run_js_half(
+                root=root,
+                js_targets=(js_targets or None),
+                only_changed=only_changed,
+                diff_base=diff_base,
+                diff_file=diff_file,
+                include_uncommitted=include_uncommitted,
+                diff_base_out=diff_base_out,
+                diff_source=diff_source,
+            )
         else:
-            proc = subprocess.run(command, cwd=root, env=env)
-    except OSError as exc:
-        print(f"i6d: could not run pytest: {exc}", file=sys.stderr)
-        return 2
-    try:
-        with open(output, encoding="utf-8") as handle:
-            evidence = json.load(handle)
-    except (OSError, json.JSONDecodeError) as exc:
-        detail = f"pytest exit {proc.returncode}"
-        if atom_mode and getattr(proc, "stdout", None):
-            detail += f"; pytest output tail: {(proc.stdout or '')[-500:]}"
-        print(f"i6d: no evidence written ({exc}); {detail}", file=sys.stderr)
-        return 2
-    evidence["pytestExit"] = proc.returncode
-    if diff_source is not None:
-        evidence["diffSource"] = diff_source
-    if evidence["verdict"] == "unexecuted_assertions" and proc.returncode == 0:
-        pass  # verdict already reflects the gate; pytest itself passed.
-    elif proc.returncode != 0 and not evidence["unexecuted"]:
-        evidence["verdict"] = "pytest_failed"
+            js_evidence = _skipped_side_evidence(
+                "i6d_assertion_execution_js", 1, root, "nodeExit",
+                diff_base_out, diff_source, only_changed,
+            )
+            js_exit = None
+
+        evidence = _merge_evidence(
+            py_evidence, js_evidence,
+            root=root, diff_base_out=diff_base_out, diff_source=diff_source,
+        )
+    finally:
+        shutil.rmtree(py_tmpdir, ignore_errors=True)
     with open(output, "w", encoding="utf-8") as handle:
         json.dump(evidence, handle, indent=2)
     if atom_mode:
         ok = evidence["verdict"] == "pass"
         print(json.dumps(_atom_summary(
             ok=ok, verdict=evidence["verdict"], proof_file=output,
-            evidence=evidence, pytest_exit=proc.returncode,
+            evidence=evidence, pytest_exit=py_exit, node_exit=js_exit,
+            languages=evidence["languages"],
         )))
-        return 0 if ok else 1
+        return _exit_for_verdict(evidence["verdict"])
     summary = (
         f"i6d: {evidence['verdict']} "
         f"({evidence['executed']}/{evidence['total']} assertions executed, "
         f"{len(evidence['unexecuted'])} unexecuted, "
-        f"{len(evidence['skipped'])} skipped; pytest exit {proc.returncode})"
+        f"{len(evidence['skipped'])} skipped; pytest exit "
+        f"{py_exit if py_exit is not None else 'skipped'})"
     )
+    if js_run:
+        summary += (
+            f" [python {py_evidence.get('executed', 0)}/{py_evidence.get('total', 0)}, "
+            f"javascript {js_evidence.get('executed', 0)}/{js_evidence.get('total', 0)}]"
+        )
     if "outOfScope" in evidence:
         summary += f" [{len(evidence['outOfScope'])} out of diff scope, base {evidence.get('diffBase')}]"
     print(summary)
@@ -697,17 +1014,18 @@ def run_gate(*, root, output, pytest_python, pytest_args,
         print(f"  unexecuted: {entry['file']}:{entry['line']}: {entry['source']}")
     if evidence["verdict"] == "diff_error":
         print(f"  diff error: {evidence.get('diffError')}", file=sys.stderr)
-        return 2
-    return 0 if evidence["verdict"] == "pass" else 1
+    return _exit_for_verdict(evidence["verdict"])
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="I6d assertion-execution gate: prove every assert in "
-        "the pytest run really executed (slice 2 adds --only-changed to "
-        "judge only asserts added/changed vs a diff base, default main; "
-        "slice 3 adds --diff-file to scope from a diff text, and "
-        "--change-id atom mode for the workflow executor)."
+        "the test run really executed -- pytest via the plugin in this "
+        "file, node:test via i6d_assertion_execution_js.js next to it; "
+        "the two halves are merged into one evidence file (slice 2 adds "
+        "--only-changed to judge only asserts added/changed vs a diff "
+        "base, default main; slice 3 adds --diff-file to scope from a "
+        "diff text, and --change-id atom mode for the workflow executor)."
     )
     parser.add_argument("--root", default=os.getcwd(), help="project root to run pytest in")
     parser.add_argument("--project-root", default=None,

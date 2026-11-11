@@ -629,8 +629,9 @@ J 管验证      K 管收尾归档
 │    │ I6b tdd.proof_validate       重算 proof 绑定，在快照上重跑命令（lite） │
 │    │ I6c tdd.quality_review       测试质量、红绿命令、skip/弱断言；       │
 │    │                              tdd_mode=refactor|docs 时替代 red 证明  │
-│    │ I6d tdd.assertion_execution  新增/改动 pytest 断言真实执行证明；    │
-│    │                              无改动 pytest 测试时直接通过（lite）    │
+│    │ I6d tdd.assertion_execution  新增/改动断言真实执行证明（pytest＋    │
+│    │                              node:test，V8 覆盖率）；无改动测试文件  │
+│    │                              时直接通过（lite）                       │
 ├────┼──────────────────────────────────────────────────────────────────────┤
 │ J  │ Judge /       验证层：确定性测试 + 漂移扫描 + 证据收集   mixed   3      │
 │    │ Verify                                                               │
