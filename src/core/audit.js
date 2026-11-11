@@ -48,6 +48,16 @@
  * count as inconsistencies, bun.lock is parsed as a lockfile
  * authority, and a repo with no trustworthy lockfile reports
  * cannot-determine instead of a hollow consistent.
+ *
+ * Slice 1 (M10, issue #156) adds go test / cargo test recognition:
+ * replay-count parsing for `go test -v` ("--- PASS:" / "--- FAIL:"
+ * lines, top-level tests only) and `cargo test` ("test result: ok.
+ * N passed; M failed;" summaries, summed across test binaries),
+ * plus Go/Rust dependency supply inside the replay tree
+ * (`go mod download all`, verified against go.sum; `cargo fetch`,
+ * --locked when Cargo.lock exists so the locked versions are
+ * honoured exactly). A failed supply is unverifiable, never a silent
+ * run without dependencies — the same rule as a failed npm install.
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -428,6 +438,36 @@ export function parseReplayCounts(output, command) {
     return { passed: bunPass, failed: bunFail, total };
   }
   if (bunPasses.length > 1 || bunFails.length > 1) return null;
+  // go test -v prints one "--- PASS:" / "--- FAIL:" line per top-level
+  // test at column 0; subtests are indented ("    --- PASS:
+  // TestX/sub") and do not match, so each test counts once. A skipped
+  // test ("--- SKIP:") is neither passed nor failed and stays out of
+  // the total, matching the pytest semantics of this function.
+  // Non-verbose `go test` prints only per-package `ok` / `FAIL` lines,
+  // which carry no per-test counts, so counts stay unparsed there and
+  // the exit code decides. (Verified against go 1.23.4, 2026-11-12;
+  // M10 slice 1, #156.)
+  const goPasses = [...text.matchAll(/^--- PASS: \S+/gm)];
+  const goFails = [...text.matchAll(/^--- FAIL: \S+/gm)];
+  if (goPasses.length > 0 || goFails.length > 0) {
+    return { passed: goPasses.length, failed: goFails.length, total: goPasses.length + goFails.length };
+  }
+  // cargo test prints one "test result: ok. N passed; M failed; ..."
+  // summary per test binary (unittests, integration tests, doc-tests),
+  // each covering a disjoint set of tests, so the summaries sum to the
+  // suite total. A failing binary stops the run before later binaries,
+  // so a partial sum is still the tests that actually ran.
+  // (Verified against cargo 1.99.1, 2026-11-12; M10 slice 1, #156.)
+  const cargoResults = [...text.matchAll(/test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed;/g)];
+  if (cargoResults.length > 0) {
+    let passed = 0;
+    let failed = 0;
+    for (const result of cargoResults) {
+      passed += Number(result[1]);
+      failed += Number(result[2]);
+    }
+    return { passed, failed, total: passed + failed };
+  }
   // python -m unittest prints one summary per run: "Ran N tests in ...",
   // then "OK" (optionally "OK (skipped=S)") or "FAILED (failures=F,
   // errors=E)". Same count semantics as the pytest branch below:
@@ -994,6 +1034,65 @@ function runShell(cwd, argv, timeoutMs) {
   };
 }
 
+/**
+ * Go/Rust dependency manifests present in a tree (M10 slice 1,
+ * issue #156). go.sum / Cargo.lock are the seals: `go mod download`
+ * verifies downloaded modules against go.sum, and `cargo fetch
+ * --locked` refuses a Cargo.lock out of sync with Cargo.toml.
+ */
+export function goRustDepManifests(workdir) {
+  return {
+    goMod: existsSync(join(workdir, 'go.mod')),
+    goSum: existsSync(join(workdir, 'go.sum')),
+    cargoToml: existsSync(join(workdir, 'Cargo.toml')),
+    cargoLock: existsSync(join(workdir, 'Cargo.lock')),
+  };
+}
+
+/**
+ * Supply Go/Rust dependencies inside a replay tree: `go mod download
+ * all` when go.mod exists, `cargo fetch` (--locked when Cargo.lock
+ * exists) when Cargo.toml exists. Only the toolchains with a claimed
+ * test command are supplied (see runAudit): a repo that merely carries
+ * a stray go.mod must not turn a JS-only audit unverifiable when go
+ * is absent.
+ *
+ * Returns one entry per supplied toolchain: { status, command, error? }
+ * where status is 'supplied' (deps fetched, seal honoured),
+ * 'missing_toolchain' (the binary is not on PATH), or 'failed'
+ * (non-zero exit — including a seal mismatch: go.sum hash drift or a
+ * Cargo.lock out of sync). The caller reports the latter two as
+ * unverifiable, never as a silent run without dependencies.
+ */
+export function supplyGoRustDeps(workdir, options = {}) {
+  const {
+    go = process.env.GO || 'go',
+    cargo = process.env.CARGO || 'cargo',
+    timeoutMs = 300000,
+    only = null,
+  } = options;
+  const manifests = goRustDepManifests(workdir);
+  const results = {};
+  const record = (tool, command, result) => {
+    if (result.exit === 0) {
+      results[tool] = { status: 'supplied', command };
+    } else if (result.spawnError) {
+      results[tool] = { status: 'missing_toolchain', command, error: result.spawnError };
+    } else {
+      results[tool] = { status: 'failed', command, error: result.outputTail.slice(-300) };
+    }
+  };
+  if (manifests.goMod && (!only || only.includes('go'))) {
+    record('go', 'go mod download all', runShell(workdir, [go, 'mod', 'download', 'all'], timeoutMs));
+  }
+  if (manifests.cargoToml && (!only || only.includes('cargo'))) {
+    const command = manifests.cargoLock ? 'cargo fetch --locked' : 'cargo fetch';
+    const args = manifests.cargoLock ? [cargo, 'fetch', '--locked'] : [cargo, 'fetch'];
+    record('cargo', command, runShell(workdir, args, timeoutMs));
+  }
+  return results;
+}
+
 function replaySeal(workdir, repoRoot, seal, python, timeoutMs) {
   const validator = resolve(repoRoot, 'xflow', 'atoms', 'i6b_tdd_proof_validate.py');
   if (!existsSync(validator)) {
@@ -1130,6 +1229,41 @@ export function runAudit(options = {}) {
         setup = { deps: 'none', error: `${installArgs[1]} failed: ${install.outputTail.slice(-300)}` };
       }
     }
+    // M10 slice 1 (#156): supply Go/Rust dependencies the same way —
+    // a fresh clone has no module cache either, so a claimed go/cargo
+    // test importing an external dependency would fail for
+    // environmental reasons. Only toolchains with a claimed test
+    // command are supplied, so a repo that merely carries a stray
+    // go.mod cannot turn a JS-only audit unverifiable when go is
+    // absent. A failed supply sets setup.error and the existing return
+    // below reports unverifiable, same as a failed npm install.
+    let goRust = {};
+    const hasGoClaim = claims.some((claim) => /\bgo\s+test\b/.test(claim.command || ''));
+    const hasCargoClaim = claims.some((claim) => /\bcargo\s+test\b/.test(claim.command || ''));
+    if ((claims.length > 0 || diff.seals.length > 0) && (hasGoClaim || hasCargoClaim)) {
+      const only = [
+        ...(hasGoClaim ? ['go'] : []),
+        ...(hasCargoClaim ? ['cargo'] : []),
+      ];
+      goRust = supplyGoRustDeps(workdir, { only });
+      const failed = Object.entries(goRust).find(
+        ([, result]) => result.status === 'failed' || result.status === 'missing_toolchain',
+      );
+      if (failed) {
+        const [, result] = failed;
+        setup = { ...setup, error: `${result.command} failed: ${result.error || result.status}` };
+      } else {
+        const supplied = Object.values(goRust)
+          .filter((result) => result.status === 'supplied')
+          .map((result) => result.command);
+        if (supplied.length > 0) {
+          setup = {
+            ...setup,
+            deps: setup.deps === 'none' ? supplied.join(' + ') : `${setup.deps} + ${supplied.join(' + ')}`,
+          };
+        }
+      }
+    }
     // M6 slice 1 (#132): judge the replay tree's node_modules snapshot
     // against the audited lockfile / source snapshot. A missing snapshot
     // with unchanged dependencies is an environment gap, not a mismatch;
@@ -1144,7 +1278,7 @@ export function runAudit(options = {}) {
       replayCopiedFromSource: setup.deps === 'copied from source repo node_modules',
     });
     if (setup.error) {
-      return { ok: false, verdict: 'unverifiable', error: `replay setup failed (${setup.error})`, claims, diff, setup, nodeModules, exitCode: 1 };
+      return { ok: false, verdict: 'unverifiable', error: `replay setup failed (${setup.error})`, claims, diff, setup, goRust, nodeModules, exitCode: 1 };
     }
 
     const claimResults = [];
@@ -1231,6 +1365,7 @@ export function runAudit(options = {}) {
       files: diff.files,
       testFiles: diff.testFiles,
       setup,
+      goRust,
       workdir: keepWorkdir ? workdir : null,
       durationMs: Date.now() - started,
     };
