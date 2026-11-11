@@ -3,6 +3,15 @@
 All notable changes to this project are documented here. Detailed notes live in
 [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## [0.5.26] - 2026-11-11
+
+### Added
+- **Milestone M6 "audit 回放保真度" — accepted (issue #69; acceptance detail issue #131, comment 6794844181)**: `xflow audit` 回放保真度三项收口——bun test 声称可识别、回放树 node_modules 快照判定不再把合法跳过的 optional 包误判为不一致、无可信 lockfile 时报 cannot-determine 而不是空心 consistent。① Slice 1 (PR #133, merged 2026-11-11T09:35:00Z, HEAD 0c42d475): `bun test` / `bun run test` 声称识别（G3，bun 输出单块汇总解析）+ 回放树 node_modules 快照一致性判定（G4：`deps_unchanged_missing_snapshot` / `deps_changed_missing_snapshot` / `consistent` / `inconsistent` 分类，只分类、不改判定口径、不翻转 verdict）。Test evidence: audit 套件 55/55（本 VM 默认环境下 3 条 I6d 用例因 pytest 不在 PATH 失败，干净 main 同文件复现相同 3 失败；补 PATH 后全绿，与改动无关）；PR CI runs verify 42995275159 and ledger 42995274547 both pass. ② Slice 3 (PR #136, merged 2026-11-11T11:40:25Z, HEAD 04c98032): optional 平台豁免（lockfile `optional: true` 条目缺失不再计 inconsistent，记入 `optionalExempted`；已安装 optional 包版本漂移仍算真实差异）+ bun.lock 解析（JSONC，`readBunLockEntries`；package-lock.json 优先，其次 bun.lock；bun 安装布局 `node_modules/.bun` store 计入已装树）+ 无可信 lockfile 时报 `cannot-determine`（consistent: null），旧 replay-vs-源树比对已移除（omo#8014 空心 consistent 的根因）。三单重跑（新版 CLI 全量 `xflow audit`，与切片 2 同命令/同 repoDir/同超时）：senpi#2606 consistent（0 差异，optional 豁免 92）、senpi#4801 consistent（0 差异，豁免 162）、omo#8014 inconsistent（401 差异＝317 缺失＋84 漂移，optional 豁免 99；如 @anthropic-ai/claude-agent-sdk 0.3.306 vs lockfile 0.3.259）。Test evidence: 新增 9 用例全过；audit 套件 64 测 61 通过、3 失败全为 I6d 用例（pytest 不在 PATH），干净 main 同文件 55 测亦同 3 失败、零回归；PR CI runs verify 43012680508 and ledger 43012680582 both pass. ③ Acceptance evidence: 3 真实历史 PR 重审＋确切新破裂点分类 B1-1～B3-3（切片 2 证据 issue #134 评论 6792844369；主轮第二方复核：三单重跑 JSON 独立实读，senpi 两单逐条核对合并头 package-lock.json 后 92/162 条差异全部为 optional 条目）。
+
+Honest note, stated plainly: 三单总 verdict 仍 mismatch（声称本身问题未变）；exemptedPackages 列表仅显示前 50、计数为全量；#4801 的 `depsChanged=true`（其 diff 触及 4 个 package.json），更正 17:03 轮「两单 depsChanged=false」口径，豁免以差异本身为准、不以 depsChanged 为门；合并提交信息里的 omo#8014 中间数 292 缺失＋137 漂移已被重跑证据 317 缺失＋84 漂移取代（主轮实读 JSON 核实）。
+
+Acceptance ledger, stated plainly: the issue #5 ledger is settled as a conclusion on the MiniMax full-matrix recheck (135/135 complete, 2026-11-10) — P2-1 passed, P1-2 / P1-3 / P2-3 did not pass — so no bench numbers are claimed in this release.
+
 ## [0.5.25] - 2026-11-11
 
 ### Added
