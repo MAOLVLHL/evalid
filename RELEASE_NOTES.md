@@ -1,5 +1,17 @@
 # Release Notes
 
+## 0.5.30 - Milestone M10 "Go/Rust 回放保真度扩展" accepted
+
+Patch release. One merged PR since 0.5.29, verified end to end in CI and locally — and the milestone it completes is now accepted.
+
+**Milestone M10 "Go/Rust 回放保真度扩展" — accepted (issue #69; acceptance detail issue #155, comment 6808773596; #155 closed 2026-11-11T22:38:18Z).** `xflow audit` now recognises `go test` / `cargo test` claims and supplies replay-tree dependencies for Go and Rust runs. Slice 1 (PR #157, merged 2026-11-11T22:06:51Z, squash 724045b9) adds the claim recognition plus replay dependency supply (`go mod download all`, `cargo fetch`, `cargo fetch --locked` when a Cargo.lock exists).
+
+**Acceptance evidence, all measured, not worker claims.** Four real cases, all taken from real public repos' real commits, each run in a cold cache (fresh GOMODCACHE / CARGO_HOME, dependencies genuinely downloaded, not warm-cache hits): testify `go test -v ./...` 472 pass / 12 fail, exit 0, replay verified, dep supply `go mod download all` (status supplied; 1.1M newly downloaded); serde_json `cargo test` 240 pass / 0 fail, exit 0, replay verified, dep supply `cargo fetch` (status supplied; no Cargo.lock, 52M newly downloaded); hexyl `cargo test` 56 pass / 0 fail, exit 0, replay verified, dep supply `cargo fetch --locked` (status supplied; 152M newly downloaded); testify mock red case — the fixed commit's test half pasted onto the pre-fix code — claimed 126 pass / 0 fail / exit 0, replayed 64 pass / 1 fail / exit 1, verdict mismatch, with a real panic in the replay output (`mock.go:1291 runtimeFunc`, `reflect: call of reflect.Value.Pointer on uint8 Value`). 3 verified (Go 1, Rust 2) + 1 mismatch (real red). Evidence filed at #158, comment 6808726204 (4 audit JSONs with full replay output, source-run logs, and diffs). The three source commits (testify 5e8a21e, serde_json 8c535a2, hexyl 626f03b) were each verified to exist via the GitHub API with matching titles; the claims were taken from real measurements of the corresponding commits in the source repos, as the source PRs' own text wrote no test counts.
+
+Honest note, stated plainly: the Go counter counts first-level subtest FAIL lines at column 0 as failures (the testify case's 12 "failures" are all first-level subtest FAIL lines such as `TestSuiteRequireTwice/SuiteRequireTwice`; every top-level test passes, all packages ok, exit 0), so a human writing the claim as "0 failures" would be judged mismatch — claim and replay share the same parser, so verdicts still agree. Follow-up filed as issue #159 (OPEN), not a blocker for this milestone. The red case's count floats across re-runs (64/1 in the audit JSON, 67/2 on a manual re-run) because the panic crash point moves with scheduling, while exit 1 and the mismatch verdict are stable.
+
+Acceptance ledger, stated plainly: the issue #5 ledger is settled as a conclusion on the MiniMax full-matrix recheck (135/135 complete, 2026-11-10) — P2-1 passed, P1-2 / P1-3 / P2-3 did not pass — so no bench numbers are claimed in this release.
+
 ## 0.5.29 - Milestone M9 "proof/audit findings as SARIF" accepted
 
 Patch release. Two merged PRs since 0.5.28, verified end to end in CI and locally — and the milestone they complete is now accepted.
