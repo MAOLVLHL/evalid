@@ -450,11 +450,58 @@ export function parseReplayCounts(output, command) {
   // stay unparsed there and the exit code decides. (Verified against
   // go 1.23.4, 2026-11-12; M10 slice 1, #156; top-level-only rule
   // M11 slice 1, #162.)
-  const goResults = [...text.matchAll(/^\s*--- (PASS|FAIL): (\S+)/gm)];
-  const goPasses = goResults.filter((r) => r[1] === 'PASS' && !r[2].includes('/'));
-  const goFails = goResults.filter((r) => r[1] === 'FAIL' && !r[2].includes('/'));
-  if (goPasses.length > 0 || goFails.length > 0) {
-    return { passed: goPasses.length, failed: goFails.length, total: goPasses.length + goFails.length };
+  // go test -v prints one "--- PASS:" / "--- FAIL:" line per test.
+  // Only top-level tests count: a test name without "/" (e.g.
+  // "TestAdd"). Subtest lines carry "/" in the name
+  // ("TestSuite/Suite", "TestAdd/sub") and are excluded, whether they
+  // sit at column 0 (testify first-level subtests do — #159) or are
+  // indented. A skipped test ("--- SKIP:") is neither passed nor
+  // failed and stays out of the total, matching the pytest semantics
+  // of this function. Non-verbose `go test` prints only per-package
+  // `ok` / `FAIL` lines, which carry no per-test counts, so counts
+  // stay unparsed there and the exit code decides. (Verified against
+  // go 1.23.4, 2026-11-12; M10 slice 1, #156; top-level-only rule
+  // M11 slice 1, #162.)
+  //
+  // Test names may contain spaces ("signature validation", testify
+  // suite_test.go:838), so the name is the whole text after
+  // "--- (PASS|FAIL): " minus the trailing " (0.00s)" duration, not
+  // just the first whitespace-delimited token. (M11 slice 3, #166.)
+  //
+  // A "--- FAIL:" line whose name has no "/" is still not a top-level
+  // failure when its package reports "ok": go only reports a package
+  // "ok" when no top-level test in it failed, so such a line can only
+  // be an inner test run — testify runs inner suite tests through
+  // testing.RunTests, whose names are glued without "/" (e.g.
+  // "TestSuiteRecoverPanicInBeforeTest", suite_test.go:120) and whose
+  // failure the outer test recovers from. Each "---" line is
+  // therefore attributed to the package whose "ok"/"FAIL" result line
+  // follows it; a FAIL line in an "ok" package is a phantom and does
+  // not count, while one in a "FAIL" package does. Without any
+  // package result line the attribution cannot be made and the
+  // top-level-only rule applies unchanged. (M11 slice 3, #166.)
+  const goResults = [...text.matchAll(/^\s*--- (PASS|FAIL): (.+?)\s*$/gm)];
+  if (goResults.length > 0) {
+    const packageResults = [];
+    const packageRe = /^(ok|FAIL)[ \t]+\S+[ \t]+(?:\(\w+\)|[\d.]+(?:m[\d.]+)?s)/gm;
+    let packageMatch;
+    while ((packageMatch = packageRe.exec(text)) !== null) {
+      packageResults.push({ ok: packageMatch[1] === 'ok', index: packageMatch.index });
+    }
+    let goPassed = 0;
+    let goFailed = 0;
+    for (const result of goResults) {
+      const name = result[2].replace(/ \([^)]*\)$/, '');
+      if (name.includes('/')) continue;
+      if (result[1] === 'FAIL') {
+        const pkg = packageResults.find((p) => p.index > result.index);
+        if (pkg && pkg.ok) continue; // phantom: package ok, no top-level failure
+        goFailed += 1;
+      } else {
+        goPassed += 1;
+      }
+    }
+    return { passed: goPassed, failed: goFailed, total: goPassed + goFailed };
   }
   // cargo test prints one "test result: ok. N passed; M failed; ..."
   // summary per test binary (unittests, integration tests, doc-tests),

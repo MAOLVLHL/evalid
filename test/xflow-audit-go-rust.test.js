@@ -339,6 +339,87 @@ describe('parseReplayCounts for go test (M10 slice 1, #156)', () => {
     assert.deepEqual(parseReplayCounts(GO_TESTIFY_SNIPPET), { passed: 2, failed: 0, total: 2 });
   });
 
+  test('test name with spaces counts as one top-level test (M11 slice 3, #166)', () => {
+    // Verbatim from the testify replay output (#165): the inner test
+    // name "signature validation" contains a space, so the old (\S+)
+    // tokeniser truncated it to "signature" and counted the parent
+    // FAIL plus three indented subtest FAILs as four top-level
+    // failures (and the indented PASS as a top-level pass). With the
+    // full name the parent has no "/" — but its package reports ok,
+    // so the whole group is a phantom and only the outer PASS counts.
+    const output = [
+      '--- FAIL: signature validation (0.00s)',
+      '    --- FAIL: signature validation/TestInvalidSignatureArg (0.00s)',
+      '    --- FAIL: signature validation/TestInvalidSignatureBoth (0.00s)',
+      '    --- FAIL: signature validation/TestInvalidSignatureReturnValue (0.00s)',
+      '    --- PASS: signature validation/TestValidSignature (0.00s)',
+      '--- PASS: TestSuiteSignatureValidation (0.00s)',
+      'PASS',
+      'ok  \tgithub.com/stretchr/testify/suite\t11.088s',
+      '',
+    ].join('\n');
+    assert.deepEqual(parseReplayCounts(output), { passed: 1, failed: 0, total: 1 });
+  });
+
+  test('RunTests inner test without "/" in an ok package does not count (M11 slice 3, #166)', () => {
+    // Verbatim shape from the testify replay output (#165): testify
+    // runs the inner test through testing.RunTests with a name glued
+    // without "/" ("TestSuiteRecoverPanicInBeforeTest"); the outer
+    // test passes and the package reports ok, so the column-0 FAIL
+    // line is a phantom, not a top-level failure.
+    const output = [
+      '--- FAIL: TestSuiteRecoverPanicInBeforeTest (0.00s)',
+      '    --- FAIL: TestSuiteRecoverPanicInBeforeTest/Test (0.00s)',
+      '--- PASS: TestSuiteRecoverPanic (0.00s)',
+      'PASS',
+      'ok  \tgithub.com/stretchr/testify/suite\t11.088s',
+      '',
+    ].join('\n');
+    assert.deepEqual(parseReplayCounts(output), { passed: 1, failed: 0, total: 1 });
+  });
+
+  test('package attribution boundary: FAIL counts in a FAIL package, not in an ok one (M11 slice 3, #166)', () => {
+    // A slash-less FAIL line in an ok package is excused, while the
+    // same shape of line in a later FAIL package still counts; the
+    // attribution follows the next package result line, not the
+    // previous one.
+    const output = [
+      '=== RUN   TestOK',
+      '--- PASS: TestOK (0.00s)',
+      '--- FAIL: TestGlueNoSlash (0.00s)',
+      'PASS',
+      'ok  \texample.test/good\t0.005s',
+      '=== RUN   TestBad',
+      '--- FAIL: TestBad (0.00s)',
+      '--- PASS: TestGood (0.00s)',
+      'FAIL',
+      'FAIL\texample.test/bad\t0.003s',
+      '',
+    ].join('\n');
+    assert.deepEqual(parseReplayCounts(output), { passed: 2, failed: 1, total: 3 });
+  });
+
+  test('without package result lines, slash-less FAIL lines still count (M11 slice 3, #166)', () => {
+    // No "ok"/"FAIL" package line means the attribution cannot be
+    // made, so the top-level-only rule applies unchanged (a FAIL
+    // line after the last package line is likewise counted: a
+    // truncated tail must not silently excuse a real failure).
+    const noPackageLines = [
+      '--- FAIL: TestAdd (0.00s)',
+      '--- PASS: TestNewID (0.00s)',
+      '',
+    ].join('\n');
+    assert.deepEqual(parseReplayCounts(noPackageLines), { passed: 1, failed: 1, total: 2 });
+    const trailingFail = [
+      '--- PASS: TestA (0.00s)',
+      'PASS',
+      'ok  \texample.test/good\t0.005s',
+      '--- FAIL: TestTrailing (0.00s)',
+      '',
+    ].join('\n');
+    assert.deepEqual(parseReplayCounts(trailingFail), { passed: 1, failed: 1, total: 2 });
+  });
+
   test('skipped tests are neither passed nor failed', () => {
     assert.deepEqual(parseReplayCounts(GO_VERBOSE_SKIP), { passed: 1, failed: 0, total: 1 });
   });
