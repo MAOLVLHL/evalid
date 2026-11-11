@@ -87,6 +87,20 @@ const GO_VERBOSE_SKIP = [
 
 const GO_NONVERBOSE = 'ok  \texample.test/gofixture\t0.004s\n';
 
+// M11 slice 1 (#162): testify first-level subtest FAIL lines sit at
+// column 0 (real output, #159). The first three lines are verbatim
+// from #159; the extra top-level PASS line stands in for the rest of
+// the suite (472 passing top-level tests in the real run).
+const GO_TESTIFY_SNIPPET = [
+  '--- FAIL: TestSuiteRequireTwice/SuiteRequireTwice (0.00s)',
+  '    --- FAIL: TestSuiteRequireTwice/SuiteRequireTwice/TestRequireOne (0.00s)',
+  '--- PASS: TestSuiteRequireTwice (0.00s)',
+  '--- PASS: TestSuiteRequireOnce (0.00s)',
+  'PASS',
+  'ok  \texample.test/gofixture\t0.005s',
+  '',
+].join('\n');
+
 const CARGO_LIB = [
   '     Running unittests src/lib.rs (target/debug/deps/rsfix-d93ed7527dcbd007)',
   '',
@@ -284,7 +298,7 @@ function headOf(repo) {
 }
 
 describe('parseReplayCounts for go test (M10 slice 1, #156)', () => {
-  test('reads go test -v top-level PASS/FAIL lines; subtests count once', () => {
+  test('reads go test -v top-level PASS/FAIL lines; subtests do not count', () => {
     // Real output: TestAdd has one subtest (indented --- PASS), so the
     // suite counts 2 top-level tests, not 3.
     assert.deepEqual(parseReplayCounts(GO_VERBOSE_PASS), { passed: 2, failed: 0, total: 2 });
@@ -292,6 +306,37 @@ describe('parseReplayCounts for go test (M10 slice 1, #156)', () => {
 
   test('reads go test -v failures', () => {
     assert.deepEqual(parseReplayCounts(GO_VERBOSE_FAIL), { passed: 1, failed: 1, total: 2 });
+  });
+
+  test('column-0 first-level subtest FAIL lines do not count (M11 slice 1, #162)', () => {
+    // testify puts a first-level subtest FAIL at column 0 (#159); the
+    // top-level test itself passes, so the suite has 0 failures.
+    const output = [
+      '--- FAIL: TestSuiteRequireTwice/SuiteRequireTwice (0.00s)',
+      '--- PASS: TestSuiteRequireTwice (0.00s)',
+      'PASS',
+      'ok  \texample.test/gofixture\t0.005s',
+      '',
+    ].join('\n');
+    assert.deepEqual(parseReplayCounts(output), { passed: 1, failed: 0, total: 1 });
+  });
+
+  test('indented subtest lines do not count (M11 slice 1, #162)', () => {
+    const output = [
+      '=== RUN   TestAdd',
+      '=== RUN   TestAdd/negative',
+      '--- PASS: TestAdd (0.00s)',
+      '    --- PASS: TestAdd/negative (0.00s)',
+      '    --- FAIL: TestAdd/broken (0.00s)',
+      'PASS',
+      'ok  \texample.test/gofixture\t0.005s',
+      '',
+    ].join('\n');
+    assert.deepEqual(parseReplayCounts(output), { passed: 1, failed: 0, total: 1 });
+  });
+
+  test('testify snippet from #159 counts 2 passed / 0 failed (M11 slice 1, #162)', () => {
+    assert.deepEqual(parseReplayCounts(GO_TESTIFY_SNIPPET), { passed: 2, failed: 0, total: 2 });
   });
 
   test('skipped tests are neither passed nor failed', () => {

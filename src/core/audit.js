@@ -438,17 +438,21 @@ export function parseReplayCounts(output, command) {
     return { passed: bunPass, failed: bunFail, total };
   }
   if (bunPasses.length > 1 || bunFails.length > 1) return null;
-  // go test -v prints one "--- PASS:" / "--- FAIL:" line per top-level
-  // test at column 0; subtests are indented ("    --- PASS:
-  // TestX/sub") and do not match, so each test counts once. A skipped
-  // test ("--- SKIP:") is neither passed nor failed and stays out of
-  // the total, matching the pytest semantics of this function.
-  // Non-verbose `go test` prints only per-package `ok` / `FAIL` lines,
-  // which carry no per-test counts, so counts stay unparsed there and
-  // the exit code decides. (Verified against go 1.23.4, 2026-11-12;
-  // M10 slice 1, #156.)
-  const goPasses = [...text.matchAll(/^--- PASS: \S+/gm)];
-  const goFails = [...text.matchAll(/^--- FAIL: \S+/gm)];
+  // go test -v prints one "--- PASS:" / "--- FAIL:" line per test.
+  // Only top-level tests count: a test name without "/" (e.g.
+  // "TestAdd"). Subtest lines carry "/" in the name
+  // ("TestSuite/Suite", "TestAdd/sub") and are excluded, whether they
+  // sit at column 0 (testify first-level subtests do — #159) or are
+  // indented. A skipped test ("--- SKIP:") is neither passed nor
+  // failed and stays out of the total, matching the pytest semantics
+  // of this function. Non-verbose `go test` prints only per-package
+  // `ok` / `FAIL` lines, which carry no per-test counts, so counts
+  // stay unparsed there and the exit code decides. (Verified against
+  // go 1.23.4, 2026-11-12; M10 slice 1, #156; top-level-only rule
+  // M11 slice 1, #162.)
+  const goResults = [...text.matchAll(/^\s*--- (PASS|FAIL): (\S+)/gm)];
+  const goPasses = goResults.filter((r) => r[1] === 'PASS' && !r[2].includes('/'));
+  const goFails = goResults.filter((r) => r[1] === 'FAIL' && !r[2].includes('/'));
   if (goPasses.length > 0 || goFails.length > 0) {
     return { passed: goPasses.length, failed: goFails.length, total: goPasses.length + goFails.length };
   }
