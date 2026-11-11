@@ -1022,6 +1022,13 @@ function replaySeal(workdir, repoRoot, seal, python, timeoutMs) {
     verdict: payload?.verdict || 'unparseable_output',
     exit: result.status,
     stderr: String(result.stderr || '').slice(-500),
+    // M9 slice 1 (#149): carry the validator's breakage points through
+    // so SARIF findings can locate them (snapshot/green-tree verdicts
+    // name `files`; `missing` names a single `file`). Absolute paths
+    // are dropped by the SARIF mapper; the seal path is the fallback.
+    files: Array.isArray(payload?.files)
+      ? payload.files.filter((file) => typeof file === 'string')
+      : (typeof payload?.file === 'string' ? [payload.file] : []),
   };
 }
 

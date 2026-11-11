@@ -43,6 +43,7 @@ import { createHash } from 'crypto';
 import { tmpdir } from 'os';
 import { ackPendingGate } from '../src/core/pending-gates.js';
 import { runAudit, renderAuditReport, parseAuditTarget } from '../src/core/audit.js';
+import { auditReportToSarif, proofToSarif, writeSarifFile } from '../src/core/sarif.js';
 import { aggregateTrend, collectTrendRecords, parseSinceDate, renderTrendReport } from '../src/core/trend.js';
 import { readEntriesFromOffset, readExecutionLogSize } from '../src/core/log-tail.js';
 import { exportDomRectsToFile, resolveCliPath } from '../src/agent_team/atoms/visual/dom-rect-export.js';
@@ -5808,6 +5809,33 @@ async function handleCorps(args) {
 
 // ─── proof ──────────────────────────────────────────────────────────────────
 
+function evalidVersion() {
+  try {
+    return JSON.parse(readFileSync(resolve(ROOT, 'package.json'), 'utf8')).version || '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+
+// Write a SARIF document or die with an actionable error (exit 2).
+// A failed SARIF write must never silently skip: the caller asked for
+// the export, so unwritable paths and schema failures are misuse, not
+// a quiet no-op (M9 slice 1, #149).
+function writeSarifOrDie(sarifPath, document) {
+  if (sarifPath === true || sarifPath === '') {
+    console.error('xflow: --sarif requires a path (e.g. --sarif out.sarif)');
+    process.exit(2);
+  }
+  try {
+    writeSarifFile(resolve(String(sarifPath)), document);
+  } catch (error) {
+    console.error(`xflow: ${error.message}`);
+    process.exit(2);
+  }
+  const count = document.runs[0]?.results?.length ?? 0;
+  console.log(`SARIF: ${sarifPath} (${count} finding${count === 1 ? '' : 's'})`);
+}
+
 async function handleProof(args) {
   if (args.some(isHelpRequest)) {
     printProofHelp();
@@ -5836,6 +5864,9 @@ async function handleProof(args) {
     write: parsedArgs.write !== false,
   });
   printProof(proof, parsedArgs);
+  if (parsedArgs.sarif !== undefined) {
+    writeSarifOrDie(parsedArgs.sarif, proofToSarif(proof, { version: evalidVersion(), projectRoot }));
+  }
   if (!proof.ok) process.exit(1);
 }
 
@@ -5863,7 +5894,7 @@ async function handleAudit(args) {
   // parseCliArgs drops bare words, so collect positionals here, skipping
   // the values of flags that take one. A positional conflicts with the
   // equivalent --pr / --diff flag.
-  const AUDIT_VALUE_FLAGS = new Set(['pr', 'diff', 'repo', 'base', 'head', 'claims', 'claims_file', 'out', 'timeout']);
+  const AUDIT_VALUE_FLAGS = new Set(['pr', 'diff', 'repo', 'base', 'head', 'claims', 'claims_file', 'out', 'sarif', 'timeout']);
   const positionals = [];
   for (let i = 0; i < args.length; i++) {
     const part = args[i];
@@ -5945,6 +5976,9 @@ async function handleAudit(args) {
     keepWorkdir: Boolean(parsedArgs.keep_workdir),
   });
   if (parsedArgs.out) writeFileSync(resolve(parsedArgs.out), `${JSON.stringify(report, null, 2)}\n`);
+  if (parsedArgs.sarif !== undefined) {
+    writeSarifOrDie(parsedArgs.sarif, auditReportToSarif(report, { version: evalidVersion() }));
+  }
   if (parsedArgs.json) console.log(JSON.stringify(report, null, 2));
   else console.log(renderAuditReport(report));
   process.exit(report.exitCode);
@@ -6936,7 +6970,7 @@ Usage: xflow audit <diff|PR> [--base <ref>] [--claims-file <file>] [--json] [--o
        xflow audit <n> | <owner/repo#n> | <github.com/.../pull/n URL>
        xflow audit --pr <n> [--repo <path>] [--json] [--out <file>]
        xflow audit --diff <patch|-> --base <ref> [--claims-file <file>] [--json]
-       xflow audit --base <ref> --head <ref> [--claims <text>] [--json]
+       xflow audit --base <ref> --head <ref> [--claims <text>] [--json] [--sarif <file>]
 
 Audit any git diff / PR without adopting evalid workflows: extract the test
 runs the change claims to have passed, replay each one in a clean clone at
@@ -6967,6 +7001,9 @@ Options:
   --no-i6d            Skip the I6d assertion-execution gate
   --json              Print the machine-readable report
   --out FILE          Write the JSON report to a file
+  --sarif FILE        Write the claim-vs-evidence findings as SARIF 2.1.0
+                      (offline schema-validated; a missing directory or an
+                      unwritable path fails with an actionable error)
   --keep-workdir      Keep the scratch clone for debugging
   help, -h, --help    Show this help message
 `);
@@ -6996,7 +7033,7 @@ Exit codes: 0 table printed, 2 misuse (bad repo path or --since date),
 
 function printProofHelp() {
   console.log(`
-Usage: xflow proof [--track corps] --change-id <id> [--project-root <path>]
+Usage: xflow proof [--track corps] --change-id <id> [--project-root <path>] [--sarif <file>]
 
 Verify workflow completion from execution logs and required artifacts, then
 write specs/changes/<id>/<track>_proof.json. A corps run is not complete
@@ -7008,6 +7045,9 @@ Options:
   --project-root PATH Target project root
   --json              Print machine-readable output
   --write false       Check without writing the proof file
+  --sarif FILE        Write the proof gaps as SARIF 2.1.0 findings (clean
+                      proof writes zero results; a missing directory or an
+                      unwritable path fails with an actionable error)
   help, -h, --help    Show this help message
 `);
 }
