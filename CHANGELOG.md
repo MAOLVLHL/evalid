@@ -3,6 +3,15 @@
 All notable changes to this project are documented here. Detailed notes live in
 [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## [0.5.31] - 2026-11-12
+
+### Added
+- **Milestone M11 "Go test 计数精确到顶层测试" — accepted (issue #69; acceptance detail issue #161, comment 6810324693; #161 closed 2026-11-12T00:07:36Z)**: `xflow audit` now counts only top-level Go tests, so a human writing the claim as "0 failures" is no longer judged mismatch when every top-level test passes. ① Slice 1 (PR #163, merged 2026-11-11T23:20:47Z, squash e40e677d): the Go parser counts only top-level tests — first-level subtest FAIL lines are no longer counted as failures (space-containing names were still truncated by (\S+); fixed in slice 3). ② Slice 3 (PR #167, merged 2026-11-11T23:53:27Z, squash eb190831): full test-name parsing plus package-level attribution — FAIL lines inside an `ok` package are correctly excluded, so phantom failures from the suite package no longer leak into the count. No hardcoded test names; JS and cargo behaviour unchanged. Acceptance evidence, all measured, not worker claims: slice 4 re-ran the testify full audit on merged main (eb190831, same case: stretchr/testify 5e8a21e + patch, base 959dbda) — 2nd run verified, 472 pass / 0 fail / exit 0, 8/8 packages ok; phantom failures 12 → 5 → 0, a real flip confirmed. go-cmp green case verified (20/0, exit 0), red case mismatch (19/1, exit 1, breaking point exactly TestDifference, the only FAIL package github.com/google/go-cmp/cmp/internal/diff), no regression. Regression: go-rust suite 27/27, audit suite 61 pass / 3 fail — the 3 failures are the pre-existing I6d pytest environment cases (`pytest` not on PATH in this VM), same names and same cause as the slice 2 baseline, zero regression. Evidence filed at #168, comment 6810293799; the main round independently re-read the new audit JSONs number-for-number before accepting.
+
+Honest note, stated plainly: the 1st audit run on merged main was mismatch (471/1), the single counted failure being upstream testify's timing test TestEventuallyTrue (100ms/20ms window), unrelated to this change's diff (mock package only); the same command re-run verified. Follow-up filed as issue #169 (OPEN), not a blocker for this milestone. This milestone closes the counting gap filed as issue #159 (still OPEN at release time; closure is for the main round to decide).
+
+Acceptance ledger, stated plainly: the issue #5 ledger is settled as a conclusion on the MiniMax full-matrix recheck (135/135 complete, 2026-11-10) — P2-1 passed, P1-2 / P1-3 / P2-3 did not pass — so no bench numbers are claimed in this release.
+
 ## [0.5.30] - 2026-11-12
 
 ### Added
