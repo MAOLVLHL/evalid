@@ -1,0 +1,6 @@
+{"type":"system","subtype":"init","session_id":"sess_2","tools":["Bash","Read","Grep"]}
+{"type":"assistant","message":{"id":"msg_10","content":[{"type":"text","text":"Running the failing suite first."},{"type":"tool_use","id":"toolu_10","name":"Bash","input":{"command":"npm test"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_10","is_error":true,"content":"exit 1: 3 failing"}]}}
+{"type":"assistant","message":{"id":"msg_11","content":[{"type":"tool_use","id":"toolu_11","name":"Read","input":{"file_path":"test/agent-stream.test.js"}},{"type":"tool_use","id":"toolu_12","name":"Grep","input":{"pattern":"pairing","path":"src/core"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_12","content":"src/core/agent-stream.js:3 matches"},{"type":"tool_result","tool_use_id":"toolu_11","content":"// agent-stream tests"}]}}
+{"type":"assistant","message":{"id":"msg_12","content":[{"type":"tool_use","id":"toolu_13","name":"Bash","input":{"command":"sleep 999"}}]}}

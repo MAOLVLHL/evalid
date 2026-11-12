@@ -12,6 +12,14 @@
  *
  * Unknown line shapes degrade to `raw` instead of throwing: a CLI version bump must never be
  * able to break a workflow run.
+ *
+ * Pairing invariant (M14 slice 1, #185): inside one `agent_run_id` scope, every id-bearing
+ * `tool_start` must be followed by exactly one `tool_end` with the same `tool_call_id` before
+ * `agent_end`. The sink enforces it while the stream flows: a breach is counted in
+ * `stats.pairing_violations`, listed on `sink.pairingViolations`, and written to the execution
+ * log as a `raw` record (`reason: 'pairing_violation'`) — never silently dropped, and never
+ * fatal to the run. The offending event itself is still recorded. `checkPairing(events)` is the
+ * same state machine as a pure function over already-normalized events, for replay checks.
  */
 import { createHash, randomBytes } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
@@ -319,6 +327,91 @@ function compactUsage(raw) {
   return Object.keys(usage).length ? usage : null;
 }
 
+export const PAIRING_VIOLATION_KINDS = Object.freeze([
+  'unpaired_tool_end',
+  'duplicate_tool_end',
+  'duplicate_tool_start',
+  'reused_tool_call_id',
+  'unpaired_at_agent_end',
+]);
+
+/**
+ * The pairing state machine: one instance per agent run (`agent_run_id` scope).
+ *
+ * `observe(event)` returns the violations that event commits (usually none). Rules, all scoped
+ * to id-bearing calls only — without an id there is nothing to pair:
+ * - `tool_start` for an id already open → `duplicate_tool_start`; for an id already closed →
+ *   `reused_tool_call_id` (an id names one call inside a run; reuse makes the log ambiguous).
+ * - `tool_end` for an id never started → `unpaired_tool_end`; for an id already closed →
+ *   `duplicate_tool_end`.
+ * - `agent_end` while calls are still open → one `unpaired_at_agent_end` per open call. The
+ *   calls stay open: only the sink's `close()` may end them, as `abandoned`.
+ * A violation is a fact about the stream, not a reason to stop it: the offending event is still
+ * recorded, and the tracker keeps going so one breach cannot hide the next.
+ */
+function createPairingTracker() {
+  const open = new Map();
+  const closed = new Set();
+
+  return {
+    observe(event) {
+      // agent_end carries no id of its own, so it must be checked before the id guard below.
+      if (event?.event === 'agent_end') {
+        return [...open.keys()].map((id) => ({ kind: 'unpaired_at_agent_end', tool_call_id: id }));
+      }
+      const callId = callIdOf(event?.tool_call_id);
+      if (!callId) return [];
+      if (event.event === 'tool_start') {
+        if (open.has(callId)) {
+          return [{ kind: 'duplicate_tool_start', tool_call_id: callId }];
+        }
+        if (closed.has(callId)) {
+          closed.delete(callId);
+          open.set(callId, { tool: event.tool ?? null, event_type: event.event_type ?? null });
+          return [{ kind: 'reused_tool_call_id', tool_call_id: callId }];
+        }
+        open.set(callId, { tool: event.tool ?? null, event_type: event.event_type ?? null });
+        return [];
+      }
+      if (event.event === 'tool_end') {
+        if (open.has(callId)) {
+          open.delete(callId);
+          closed.add(callId);
+          return [];
+        }
+        if (closed.has(callId)) return [{ kind: 'duplicate_tool_end', tool_call_id: callId }];
+        return [{ kind: 'unpaired_tool_end', tool_call_id: callId }];
+      }
+      return [];
+    },
+    /** Calls still open, as [tool_call_id, {tool, event_type}] pairs; clears them as closed. */
+    drainOpen() {
+      const entries = [...open.entries()];
+      for (const [callId] of entries) {
+        open.delete(callId);
+        closed.add(callId);
+      }
+      return entries;
+    },
+  };
+}
+
+/**
+ * Pairing violations in an already-normalized event list, in stream order. Same state machine
+ * the sink runs live; used by replay checks (M14 slice 2 replays recorded streams through it).
+ * Each violation carries the offending event's `seq` when present.
+ */
+export function checkPairing(events) {
+  const tracker = createPairingTracker();
+  const violations = [];
+  for (const event of events ?? []) {
+    for (const violation of tracker.observe(event)) {
+      violations.push({ ...violation, seq: event?.seq ?? null });
+    }
+  }
+  return violations;
+}
+
 /**
  * Collect normalized events from one agent process and append them to the execution log.
  *
@@ -341,10 +434,12 @@ export function createAgentEventSink(options = {}) {
     : `agent_run_${randomBytes(6).toString('hex')}`;
 
   const queue = [];
-  const stats = { lines: 0, events: 0, written: 0, dropped: 0, truncated: 0, write_errors: 0 };
+  const stats = { lines: 0, events: 0, written: 0, dropped: 0, truncated: 0, write_errors: 0, pairing_violations: 0 };
   const toolNames = new Map();
-  // Only id-bearing calls are tracked: without an id there is nothing to pair a closing event to.
-  const openCalls = new Map();
+  // Pairing state for this run only: two sinks sharing one log never share a tracker, so a CLI
+  // reusing ids across runs cannot produce a false violation in either.
+  const pairing = createPairingTracker();
+  const pairingViolations = [];
   let seq = 0;
   let timer = null;
   let writing = Promise.resolve();
@@ -357,8 +452,10 @@ export function createAgentEventSink(options = {}) {
       seq += 1;
       stats.events += 1;
       if (normalized.truncated) stats.truncated += 1;
-      rememberCall(normalized);
       enqueue(buildRecord(normalized, seq));
+      for (const violation of pairing.observe(normalized)) {
+        recordPairingViolation({ ...violation, seq });
+      }
     }
     schedule();
   });
@@ -371,14 +468,25 @@ export function createAgentEventSink(options = {}) {
     }
   }
 
-  function rememberCall(event) {
-    const callId = callIdOf(event.tool_call_id);
-    if (!callId) return;
-    if (event.event === 'tool_start') {
-      openCalls.set(callId, { tool: event.tool ?? null, event_type: event.event_type ?? null });
-    } else if (event.event === 'tool_end') {
-      openCalls.delete(callId);
-    }
+  /**
+   * A pairing breach is surfaced three ways at once: counted in stats, listed for the caller,
+   * and written to the execution log as a `raw` record so the cockpit / --progress views can
+   * show it. The offending event was already enqueued above; this record is the flag on it.
+   * `sink.close()` discards its stats return in agent-invoke, so the log record is the one
+   * surface that always survives a real run.
+   */
+  function recordPairingViolation(violation) {
+    stats.pairing_violations += 1;
+    pairingViolations.push({ ...violation, agent_run_id: agentRunId });
+    seq += 1;
+    stats.events += 1;
+    enqueue(buildRecord({
+      event: 'raw',
+      reason: 'pairing_violation',
+      violation: violation.kind,
+      tool_call_id: violation.tool_call_id,
+      text: `pairing violation (${violation.kind}) for tool_call_id ${violation.tool_call_id}`,
+    }, seq));
   }
 
   function buildRecord(event, eventSeq) {
@@ -393,7 +501,7 @@ export function createAgentEventSink(options = {}) {
     };
     for (const key of [
       'event_type', 'tool', 'tool_call_id', 'text', 'args_preview', 'args_digest', 'usage',
-      'exit_code', 'status', 'level', 'cost_usd', 'duration_ms', 'reason', 'truncated',
+      'exit_code', 'status', 'level', 'cost_usd', 'duration_ms', 'reason', 'truncated', 'violation',
     ]) {
       const value = event[key];
       if (value === undefined || value === null) continue;
@@ -447,7 +555,7 @@ export function createAgentEventSink(options = {}) {
      */
     async close() {
       splitter.flush();
-      for (const [callId, call] of openCalls) {
+      for (const [callId, call] of pairing.drainOpen()) {
         seq += 1;
         stats.events += 1;
         enqueue(buildRecord({
@@ -458,13 +566,15 @@ export function createAgentEventSink(options = {}) {
           status: 'abandoned',
         }, seq));
       }
-      openCalls.clear();
       closed = true;
       await flush();
       return stats;
     },
     flush,
     stats,
+    get pairingViolations() {
+      return pairingViolations.map((violation) => ({ ...violation }));
+    },
     get pending() {
       return queue.length;
     },

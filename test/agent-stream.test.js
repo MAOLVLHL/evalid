@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import {
+  checkPairing,
   createAgentEventSink,
   createLineSplitter,
   normalizeAgentEvent,
@@ -15,6 +16,8 @@ import { readExecutionLog } from '../src/core/execution-log.js';
 const FIXTURES = resolve(import.meta.dirname, 'fixtures', 'agent-stream');
 const codexFixture = readFileSync(join(FIXTURES, 'codex.ndjson'), 'utf8');
 const claudeFixture = readFileSync(join(FIXTURES, 'claude.ndjson'), 'utf8');
+const claudeErrorKilledFixture = readFileSync(join(FIXTURES, 'claude-error-killed.ndjson'), 'utf8');
+const codexKilledFixture = readFileSync(join(FIXTURES, 'codex-killed.ndjson'), 'utf8');
 
 function makeProjectRoot() {
   const root = mkdtempSync(join(tmpdir(), 'openflow-agent-stream-'));
@@ -32,6 +35,29 @@ function collect(fixture, adapter, options = {}) {
     events.push(...normalizeAgentEvents(line, { adapter, seq: events.length, ...options }));
   }
   return events;
+}
+
+/** Every id-bearing tool_start has exactly one tool_end with the same id. */
+function assertPaired(events) {
+  const starts = new Map();
+  const ends = new Map();
+  for (const event of events) {
+    if (!event.tool_call_id) continue;
+    if (event.event === 'tool_start') starts.set(event.tool_call_id, (starts.get(event.tool_call_id) || 0) + 1);
+    if (event.event === 'tool_end') ends.set(event.tool_call_id, (ends.get(event.tool_call_id) || 0) + 1);
+  }
+  assert.deepEqual([...ends.entries()].sort(), [...starts.entries()].sort(), 'every tool_start has exactly one tool_end');
+}
+
+/** Push a whole fixture through a sink, close it, and return the sink, stats and log events. */
+async function replayFixture(projectRoot, fixture, adapter, options = {}) {
+  const sink = createAgentEventSink({ projectRoot, adapter, flushIntervalMs: 5, ...options });
+  sink.push(fixture);
+  const stats = await sink.close();
+  const log = await readExecutionLog(projectRoot, { limit: 50 });
+  assert.equal(log.chain.ok, true);
+  const events = log.entries.filter((entry) => entry.kind === 'agent_event').reverse();
+  return { sink, stats, events };
 }
 
 describe('Agent stream', () => {
@@ -173,6 +199,53 @@ describe('Agent stream', () => {
     });
   });
 
+  describe('checkPairing', () => {
+    const start = (id, seq) => ({ seq, event: 'tool_start', tool: 'Bash', tool_call_id: id });
+    const end = (id, seq) => ({ seq, event: 'tool_end', tool: 'Bash', tool_call_id: id });
+
+    test('a clean claude run has no violations', () => {
+      assert.deepEqual(checkPairing(collect(claudeFixture, 'claude_cli', { toolNames: new Map() })), []);
+    });
+
+    test('flags a tool_end whose tool_use was never seen', () => {
+      assert.deepEqual(checkPairing([end('toolu_ghost', 1)]), [
+        { kind: 'unpaired_tool_end', tool_call_id: 'toolu_ghost', seq: 1 },
+      ]);
+    });
+
+    test('flags a second tool_end for an already closed call', () => {
+      assert.deepEqual(checkPairing([start('toolu_1', 1), end('toolu_1', 2), end('toolu_1', 3)]), [
+        { kind: 'duplicate_tool_end', tool_call_id: 'toolu_1', seq: 3 },
+      ]);
+    });
+
+    test('flags a second tool_start while the first is still open', () => {
+      assert.deepEqual(checkPairing([start('toolu_1', 1), start('toolu_1', 2)]), [
+        { kind: 'duplicate_tool_start', tool_call_id: 'toolu_1', seq: 2 },
+      ]);
+    });
+
+    test('flags an id reused after its call already closed', () => {
+      assert.deepEqual(checkPairing([start('toolu_1', 1), end('toolu_1', 2), start('toolu_1', 3)]), [
+        { kind: 'reused_tool_call_id', tool_call_id: 'toolu_1', seq: 3 },
+      ]);
+    });
+
+    test('flags every call still open when agent_end arrives', () => {
+      assert.deepEqual(checkPairing([start('toolu_1', 1), start('toolu_2', 2), { seq: 3, event: 'agent_end' }]), [
+        { kind: 'unpaired_at_agent_end', tool_call_id: 'toolu_1', seq: 3 },
+        { kind: 'unpaired_at_agent_end', tool_call_id: 'toolu_2', seq: 3 },
+      ]);
+    });
+
+    test('ignores calls without an id: nothing to pair them to', () => {
+      assert.deepEqual(checkPairing([
+        { seq: 1, event: 'tool_start', tool: 'Bash', tool_call_id: null },
+        { seq: 2, event: 'tool_end', tool: 'Bash', tool_call_id: null },
+      ]), []);
+    });
+  });
+
   describe('createAgentEventSink', () => {
     test('batches CLI output into hash-chained execution log entries', async () => {
       const projectRoot = makeProjectRoot();
@@ -280,6 +353,117 @@ describe('Agent stream', () => {
       }
     });
 
+    test('pairs a claude error + killed run end to end, including concurrent calls', async () => {
+      const projectRoot = makeProjectRoot();
+      try {
+        const { sink, stats, events } = await replayFixture(projectRoot, claudeErrorKilledFixture, 'claude_cli', { agentRunId: 'agent_run_test' });
+        assert.equal(stats.pairing_violations, 0, 'clean replay must not raise a violation');
+        assert.deepEqual(sink.pairingViolations, []);
+        assert.equal(stats.events, 10, '9 normalized events + 1 abandoned end');
+        assert.equal(stats.written, 10);
+        assertPaired(events);
+        assert.deepEqual(events.map((entry) => entry.event), [
+          'agent_start', 'message_end',
+          'tool_start', 'tool_end',
+          'tool_start', 'tool_start', 'tool_end', 'tool_end',
+          'tool_start', 'tool_end',
+        ]);
+        // Error result maps to an error end.
+        assert.equal(events[3].tool_call_id, 'toolu_10');
+        assert.equal(events[3].status, 'error');
+        // Concurrent calls pair even when their results arrive out of order.
+        assert.deepEqual(events.slice(4, 8).map((entry) => entry.tool_call_id), ['toolu_11', 'toolu_12', 'toolu_12', 'toolu_11']);
+        // The killed call is closed by close(), not left running.
+        assert.equal(events[9].tool_call_id, 'toolu_13');
+        assert.equal(events[9].status, 'abandoned');
+        assert.equal(events[9].agent_run_id, 'agent_run_test');
+        assert.ok(events.every((entry) => entry.agent_run_id === 'agent_run_test'));
+      } finally {
+        rmSync(projectRoot, { recursive: true, force: true });
+      }
+    });
+
+    test('pairs a killed codex run: the open command is abandoned on close', async () => {
+      const projectRoot = makeProjectRoot();
+      try {
+        const { sink, stats, events } = await replayFixture(projectRoot, codexKilledFixture, 'codex_cli', { agentRunId: 'agent_run_test' });
+        assert.equal(stats.pairing_violations, 0);
+        assert.deepEqual(sink.pairingViolations, []);
+        assert.equal(stats.events, 3, 'agent_start + tool_start + abandoned end');
+        assertPaired(events);
+        assert.deepEqual(events.map((entry) => entry.event), ['agent_start', 'tool_start', 'tool_end']);
+        assert.equal(events[1].tool, 'shell');
+        assert.equal(events[1].tool_call_id, 'item_1');
+        assert.equal(events[2].status, 'abandoned');
+        assert.equal(events[2].tool_call_id, 'item_1');
+        assert.equal(events[2].agent_run_id, 'agent_run_test');
+      } finally {
+        rmSync(projectRoot, { recursive: true, force: true });
+      }
+    });
+
+    test('surfaces an orphan tool_end as a violation without dropping it', async () => {
+      const projectRoot = makeProjectRoot();
+      try {
+        const orphan = '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_ghost","content":"ok"}]}}\n';
+        const { sink, stats, events } = await replayFixture(projectRoot, orphan, 'claude_cli', { agentRunId: 'agent_run_test' });
+        assert.equal(stats.pairing_violations, 1);
+        assert.deepEqual(sink.pairingViolations, [
+          { kind: 'unpaired_tool_end', tool_call_id: 'toolu_ghost', seq: 1, agent_run_id: 'agent_run_test' },
+        ]);
+        assert.equal(stats.events, 2, 'the tool_end plus its violation flag');
+        // The orphan end stays readable in the log; the violation is a flag on it, not a drop.
+        assert.equal(events[0].event, 'tool_end');
+        assert.equal(events[0].tool_call_id, 'toolu_ghost');
+        assert.equal(events[1].event, 'raw');
+        assert.equal(events[1].reason, 'pairing_violation');
+        assert.equal(events[1].violation, 'unpaired_tool_end');
+        assert.equal(events[1].tool_call_id, 'toolu_ghost');
+        assert.match(events[1].text, /unpaired_tool_end/);
+      } finally {
+        rmSync(projectRoot, { recursive: true, force: true });
+      }
+    });
+
+    test('surfaces a duplicate tool_end as a violation without dropping either end', async () => {
+      const projectRoot = makeProjectRoot();
+      try {
+        const toolUse = '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_5","name":"Bash","input":{"command":"ls"}}]}}\n';
+        const result = '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_5","content":"ok"}]}}\n';
+        const { sink, stats, events } = await replayFixture(projectRoot, toolUse + result + result, 'claude_cli', { agentRunId: 'agent_run_test' });
+        assert.equal(stats.pairing_violations, 1);
+        assert.deepEqual(sink.pairingViolations, [
+          { kind: 'duplicate_tool_end', tool_call_id: 'toolu_5', seq: 3, agent_run_id: 'agent_run_test' },
+        ]);
+        assert.equal(events.filter((entry) => entry.event === 'tool_end').length, 2, 'both ends stay in the log');
+        assert.equal(events.filter((entry) => entry.reason === 'pairing_violation').length, 1);
+      } finally {
+        rmSync(projectRoot, { recursive: true, force: true });
+      }
+    });
+
+    test('flags a call still open at agent_end, then abandons it on close', async () => {
+      const projectRoot = makeProjectRoot();
+      try {
+        const stream = [
+          '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_20","name":"Bash","input":{"command":"sleep 999"}}]}}',
+          '{"type":"result","subtype":"success","is_error":false,"duration_ms":1000,"total_cost_usd":0.001,"usage":{"input_tokens":10,"output_tokens":5}}',
+        ].join('\n') + '\n';
+        const { sink, stats, events } = await replayFixture(projectRoot, stream, 'claude_cli', { agentRunId: 'agent_run_test' });
+        assert.equal(stats.pairing_violations, 1);
+        assert.deepEqual(sink.pairingViolations, [
+          { kind: 'unpaired_at_agent_end', tool_call_id: 'toolu_20', seq: 2, agent_run_id: 'agent_run_test' },
+        ]);
+        assertPaired(events);
+        assert.deepEqual(events.map((entry) => entry.event), ['tool_start', 'agent_end', 'raw', 'tool_end']);
+        assert.equal(events[2].violation, 'unpaired_at_agent_end');
+        assert.equal(events[3].status, 'abandoned');
+        assert.equal(events[3].tool_call_id, 'toolu_20');
+      } finally {
+        rmSync(projectRoot, { recursive: true, force: true });
+      }
+    });
+
     test('scopes concurrent agent runs so their tool-call ids cannot collide', async () => {
       const projectRoot = makeProjectRoot();
       try {
@@ -299,6 +483,34 @@ describe('Agent stream', () => {
         assert.deepEqual([...perRun.keys()].sort(), ['agent_run_a', 'agent_run_b']);
         assert.deepEqual([...perRun.values()], [2, 2]);
         assert.ok(events.every((entry) => entry.tool_call_id === 'item_1'));
+      } finally {
+        rmSync(projectRoot, { recursive: true, force: true });
+      }
+    });
+
+    test('replays the same claude ids through two runs without cross-talk or violations', async () => {
+      const projectRoot = makeProjectRoot();
+      try {
+        const first = createAgentEventSink({ projectRoot, adapter: 'claude_cli', flushIntervalMs: 5, agentRunId: 'agent_run_a' });
+        const second = createAgentEventSink({ projectRoot, adapter: 'claude_cli', flushIntervalMs: 5, agentRunId: 'agent_run_b' });
+        first.push(claudeFixture);
+        second.push(claudeFixture);
+        const firstStats = await first.close();
+        const secondStats = await second.close();
+
+        assert.equal(firstStats.pairing_violations, 0);
+        assert.equal(secondStats.pairing_violations, 0);
+        assert.deepEqual(first.pairingViolations, []);
+        assert.deepEqual(second.pairingViolations, []);
+
+        const log = await readExecutionLog(projectRoot, { limit: 30 });
+        assert.equal(log.chain.ok, true);
+        const events = log.entries.filter((entry) => entry.kind === 'agent_event');
+        for (const runId of ['agent_run_a', 'agent_run_b']) {
+          const perRun = events.filter((entry) => entry.agent_run_id === runId);
+          assert.equal(perRun.length, 7, `${runId} keeps its own 7 events`);
+          assertPaired(perRun);
+        }
       } finally {
         rmSync(projectRoot, { recursive: true, force: true });
       }

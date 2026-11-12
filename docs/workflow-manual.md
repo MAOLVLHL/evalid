@@ -1139,7 +1139,7 @@ GET /api/events   event: log, id: <entry_hash>
 
 未知的 CLI 事件类型一律降级为 `raw` 或被忽略，不抛错：CLI 升级不会让整条 workflow 失败。
 
-工具调用遵循一条生命周期约定：`tool_start` 带 `tool_call_id`（claude `tool_use.id`、codex `item.id`），配对的 `tool_end` 带同一个 id；没有 id 的调用不进入配对表——没有 id 就没有可对齐的对象。`agent_run_id` 给一次 agent 进程划范围，两个 atom 并发、各自的 CLI 都从 `toolu_1` 编号时靠它区分。`sink.close()` 会把仍未结束的调用补成 `status: "abandoned"`：被杀掉的那次运行（默认 300 秒超时、Ctrl-C、CLI 崩溃）永远发不出最后一条 `tool_result`，而没有终态的日志等于没有证据。
+工具调用遵循一条生命周期约定：`tool_start` 带 `tool_call_id`（claude `tool_use.id`、codex `item.id`），配对的 `tool_end` 带同一个 id；没有 id 的调用不进入配对表——没有 id 就没有可对齐的对象。`agent_run_id` 给一次 agent 进程划范围，两个 atom 并发、各自的 CLI 都从 `toolu_1` 编号时靠它区分。`sink.close()` 会把仍未结束的调用补成 `status: "abandoned"`：被杀掉的那次运行（默认 300 秒超时、Ctrl-C、CLI 崩溃）永远发不出最后一条 `tool_result`，而没有终态的日志等于没有证据。配对违规（无配对的 `tool_end`、重复的 `tool_end`、重复的 `tool_start`、同一 run 内复用 id、`agent_end` 到达时仍有调用未结束）会被显性报出：计入 `stats.pairing_violations`、列在 `sink.pairingViolations`、并以 `reason: "pairing_violation"` 的 `raw` 记录写进执行日志；违规事件本身仍保留，不静默丢弃、不中断运行。
 
 ### 订阅
 

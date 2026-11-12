@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"thread_9d1a"}
+{"type":"item.started","item":{"id":"item_0","type":"reasoning","text":"Planning the build"}}
+{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"Planning the build"}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"npm run build"}}
