@@ -7027,10 +7027,11 @@ Usage: xflow audit <diff|PR> [--base <ref>] [--claims-file <file>] [--json] [--o
 Audit any git diff / PR without adopting evalid workflows: extract the test
 runs the change claims to have passed, replay each one in a clean clone at
 the change's head, and compare exit codes and pass/fail counts against the
-claim. bun test claims are recognised, and the replay tree's node_modules
-is checked against the lockfile (or the source snapshot when there is no
-lockfile): a missing snapshot with unchanged dependencies is not a
-mismatch, while a real inconsistency names the exact differing files.
+claim. bun test, pnpm/yarn script runs, vitest and jest claims are
+recognised, and the replay tree's node_modules is checked against the
+lockfile (or the source snapshot when there is no lockfile): a missing
+snapshot with unchanged dependencies is not a mismatch, while a real
+inconsistency names the exact differing files.
 Diffs carrying an evalid proof seal are replayed through the existing
 i6b seal validator. When the diff touches Python test files and the audited
 repo carries the I6d plugin, the I6d assertion-execution gate also runs in

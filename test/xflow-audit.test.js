@@ -210,6 +210,40 @@ describe('extractClaims', () => {
     assert.equal(claims[1].claimedPassed, 18);
     assert.equal(claims[1].claimedFailed, 0);
   });
+
+  test('keeps pnpm/yarn script runs whole instead of trimming them to npm', () => {
+    // `pnpm run test` used to come back as `npm run test`: the npm family
+    // matched from index 1 inside "pnpm" and the leftmost match won, so the
+    // replay ran a different command than the one claimed. `yarn run test`
+    // was not recognised at all, which made a body that named its run
+    // audit as no_claims.
+    const body = [
+      'Full suite: `pnpm run test`: 50 files, 440 tests, 439 passed, 0 failed.',
+      'Also `yarn run test`: exit 0.',
+    ].join('\n');
+    const claims = extractClaims(body);
+    assert.deepEqual(claims.map((claim) => claim.command), ['pnpm run test', 'yarn run test']);
+    assert.equal(claims[0].claimedPassed, 439);
+    assert.equal(claims[1].claimedExit, 0);
+  });
+
+  test('reads vitest and jest claims from backticks, never from prose', () => {
+    // These are the runners a JS PR most often names. A fenced span is a
+    // command the author says they ran; the same word in prose is a
+    // statement about tooling ("we use jest"), and replaying `jest` from it
+    // would run a binary the repo may not even depend on.
+    assert.deepEqual(extractClaims('We use vitest and jest for unit tests.'), []);
+    const body = [
+      'Unit tests: `vitest run` — 18 passed, 0 failed.',
+      'Coverage: `yarn jest --coverage` — exit 0.',
+    ].join('\n');
+    const claims = extractClaims(body);
+    // The package-manager prefix stays on the command: replaying the bare
+    // runner would run something other than what the author claimed.
+    assert.deepEqual(claims.map((claim) => claim.command), ['vitest run', 'yarn jest --coverage']);
+    assert.equal(claims[0].claimedPassed, 18);
+    assert.equal(claims[1].claimedExit, 0);
+  });
 });
 
 describe('resolveClaimCwd (M2 slice 2, #116)', () => {
@@ -367,6 +401,31 @@ describe('parseReplayCounts', () => {
       parseReplayCounts(' 3 pass\n 1 fail\n 4 expect() calls\nRan 4 tests across 2 files. [5.00ms]\n'),
       { passed: 3, failed: 1, total: 4 },
     );
+  });
+
+  test('reads vitest and jest summary lines, and leaves a multi-project run unparsed', () => {
+    // vitest 3 prints one count-first "Tests" line with the total in
+    // parentheses; jest 30 prints the same counts with "N total" instead.
+    // Both orders show up (failed first when a test fails).
+    assert.deepEqual(
+      parseReplayCounts(' Test Files  2 passed (2)\n      Tests  18 passed (18)\n   Duration  1.2s\n'),
+      { passed: 18, failed: 0, total: 18 },
+    );
+    assert.deepEqual(
+      parseReplayCounts('      Tests  1 failed | 17 passed (18)\n'),
+      { passed: 17, failed: 1, total: 18 },
+    );
+    assert.deepEqual(parseReplayCounts('Tests:       18 passed, 18 total\n'), { passed: 18, failed: 0, total: 18 });
+    assert.deepEqual(
+      parseReplayCounts('Tests:       2 failed, 16 passed, 20 total, 2 todo\n'),
+      { passed: 16, failed: 2, total: 20 },
+    );
+    // One block per project: several blocks are not a suite total, the same
+    // rule the multi-block node --test case above follows.
+    assert.equal(parseReplayCounts('      Tests  18 passed (18)\n      Tests  4 passed (4)\n'), null);
+    // A "Tests" marker without counts (a runner that printed nothing) is not
+    // a summary and must not invent a zero-test total.
+    assert.equal(parseReplayCounts('Tests: no test files found\n'), null);
   });
 });
 

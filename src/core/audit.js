@@ -58,34 +58,117 @@
  * --locked when Cargo.lock exists so the locked versions are
  * honoured exactly). A failed supply is unverifiable, never a silent
  * run without dependencies — the same rule as a failed npm install.
+ *
+ * Claim harvesting now reads one command-family table to both recognise a
+ * claimed run and cut it out of the sentence. The two lists used to be
+ * written by hand and had drifted: `pnpm run test` was harvested as
+ * `npm run test` (the npm family matched inside the longer word), and
+ * `yarn run test` / `vitest run` / `jest` were not recognised at all, so
+ * a PR that quoted them was audited as no_claims. vitest and jest count
+ * only inside backticks — bare "we use jest" stays prose — and their
+ * replay summaries ("Tests  18 passed (18)" / "Tests:  18 passed,
+ * 18 total") are parsed so a count overstatement is still a mismatch.
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-/** Commands that count as claimed test runs. */
-export const TEST_COMMAND_PATTERNS = [
-  /npm\s+test\b/,
-  /npm\s+run\s+[\w:.-]+/,
-  /pnpm\s+test\b/,
-  /yarn\s+test\b/,
-  /node\s+--test\b/,
-  /pytest\b/,
-  /python3?\s+-m\s+pytest\b/,
-  /python3?\s+-m\s+unittest\b/,
-  /go\s+test\b/,
-  /cargo\s+test\b/,
-  /mvn\s+(?:-[^ ]+\s+)*test\b/,
-  /npx\s+[\w@./-]+/,
-  /bun\s+test\b/,
-  /bun\s+run\s+[\w:.-]+/,
+/**
+ * One row per command family: the shape a claim may take in prose
+ * (`detect`, what isTestCommand matches) and the runnable slice harvested
+ * out of it (`tail`). Both command lists are derived from this table, so a
+ * runner added here cannot be recognised by one list and truncated by the
+ * other. The two lists had drifted apart once: `pnpm run test` was
+ * harvested as `npm run test`, because the npm family matched from index 1
+ * inside "pnpm" and the leftmost match won. The tails are therefore
+ * anchored on a token edge below, so a match can only start at the command.
+ *
+ * `bare: false` marks a family that only counts when the claim puts it in
+ * backticks (`vitest`, `jest`): "we use jest for unit tests" is prose about
+ * a runner, while "`jest --coverage`" is a command the author says they ran.
+ */
+const COMMAND_CHARS = String.raw`[\w@./:+\-='"]`;
+const COMMAND_EDGE = String.raw`(?<![\w@./:\-])`;
+const TEST_COMMAND_FAMILIES = [
+  {
+    name: 'script',
+    detect: /(?:npm|pnpm|yarn|bun)\s+run\s+[\w:.-]+/,
+    tail: String.raw`(?:npm|pnpm|yarn|bun)\s+run\s+[\w:.-]+`,
+  },
+  {
+    name: 'shortScript',
+    detect: /(?:npm|pnpm|yarn|bun)\s+test\b/,
+    tail: String.raw`(?:npm|pnpm|yarn|bun)\s+test(?:\s+${COMMAND_CHARS}+)*`,
+  },
+  {
+    name: 'nodeTest',
+    detect: /node\s+--test\b/,
+    tail: String.raw`node\s+--test(?:\s+${COMMAND_CHARS}+)*`,
+  },
+  {
+    name: 'pytest',
+    detect: /pytest\b/,
+    tail: String.raw`pytest(?:\s+${COMMAND_CHARS}+)*`,
+  },
+  {
+    name: 'pythonPytest',
+    detect: /python3?\s+-m\s+pytest\b/,
+    tail: String.raw`python3?\s+-m\s+pytest(?:\s+${COMMAND_CHARS}+)*`,
+  },
+  {
+    name: 'unittest',
+    detect: /python3?\s+-m\s+unittest\b/,
+    tail: String.raw`python3?\s+-m\s+unittest(?:\s+${COMMAND_CHARS}+)*`,
+  },
+  {
+    name: 'goTest',
+    detect: /go\s+test\b/,
+    tail: String.raw`go\s+test(?:\s+${COMMAND_CHARS}+)*`,
+  },
+  {
+    name: 'cargoTest',
+    detect: /cargo\s+test\b/,
+    tail: String.raw`cargo\s+test(?:\s+${COMMAND_CHARS}+)*`,
+  },
+  {
+    name: 'maven',
+    detect: /mvn\s+(?:-[^ ]+\s+)*test\b/,
+    tail: String.raw`mvn\s+(?:-[^\s]+\s+)*test`,
+  },
+  {
+    name: 'npx',
+    detect: /npx\s+[\w@./-]+/,
+    tail: String.raw`npx\s+[\w@./-]+(?:\s+${COMMAND_CHARS}+)*`,
+  },
+  // The runner families carry an optional package-manager prefix: that
+  // prefix is part of the command ("yarn jest"), not a word to drop, and
+  // without it the match would also start a word too late.
+  {
+    name: 'vitest',
+    bare: false,
+    detect: /\bvitest\b/,
+    tail: String.raw`(?:(?:npx|pnpm|yarn|bun)\s+(?:exec\s+|dlx\s+)?)?vitest(?:\s+${COMMAND_CHARS}+)*(?![\w.])`,
+  },
+  {
+    name: 'jest',
+    bare: false,
+    detect: /\bjest\b/,
+    tail: String.raw`(?:(?:npx|pnpm|yarn|bun)\s+(?:exec\s+|dlx\s+)?)?jest(?:\s+${COMMAND_CHARS}+)*(?![\w.])`,
+  },
 ];
 
-const COMMAND_CHARS = String.raw`[\w@./:+\-='"]`;
-const COMMAND_TAIL = new RegExp(
-  String.raw`(?:npm\s+test|npm\s+run\s+[\w:.-]+|pnpm\s+test|yarn\s+test|node\s+--test(?:\s+${COMMAND_CHARS}+)*|pytest(?:\s+${COMMAND_CHARS}+)*|python3?\s+-m\s+pytest(?:\s+${COMMAND_CHARS}+)*|python3?\s+-m\s+unittest(?:\s+${COMMAND_CHARS}+)*|go\s+test(?:\s+${COMMAND_CHARS}+)*|cargo\s+test(?:\s+${COMMAND_CHARS}+)*|mvn\s+(?:-[^\s]+\s+)*test|npx\s+[\w@./-]+(?:\s+${COMMAND_CHARS}+)*|bun\s+test(?:\s+${COMMAND_CHARS}+)*|bun\s+run\s+[\w:.-]+)`,
-);
+/** Commands that count as claimed test runs. */
+export const TEST_COMMAND_PATTERNS = TEST_COMMAND_FAMILIES.map((family) => family.detect);
+
+function buildCommandTail(families) {
+  return new RegExp(`${COMMAND_EDGE}(?:${families.map((family) => family.tail).join('|')})`);
+}
+
+/** Harvest inside backticks: every family, the bare-word ones included. */
+const COMMAND_TAIL = buildCommandTail(TEST_COMMAND_FAMILIES);
+/** Harvest from prose: only families that read as a command on their own. */
+const COMMAND_TAIL_BARE = buildCommandTail(TEST_COMMAND_FAMILIES.filter((family) => family.bare !== false));
 
 export function isTestCommand(text) {
   return TEST_COMMAND_PATTERNS.some((pattern) => pattern.test(text));
@@ -320,12 +403,15 @@ export function extractClaims(text) {
     const clauses = line.split(/(?:[.;]\s+|\s+;\s*)/);
     for (const clause of clauses) {
       const commands = new Set();
+      // A fenced span is a command the author chose to quote, so every
+      // family counts there; unlocked prose only yields families that
+      // stand on their own (see TEST_COMMAND_FAMILIES' bare flag).
       const spans = [...clause.matchAll(/`([^`]+)`/g)].map((span) => span[1]);
       for (const span of spans) {
         const found = span.match(COMMAND_TAIL);
         if (found) commands.add(normalizeCommand(found[0]));
       }
-      const bare = clause.match(COMMAND_TAIL);
+      const bare = clause.match(COMMAND_TAIL_BARE);
       if (bare) commands.add(normalizeCommand(bare[0]));
       if (commands.size === 0) continue;
       const counts = parseClaimCounts(clause);
@@ -416,10 +502,33 @@ export function parseDiffFiles(diffText) {
 }
 
 /**
+ * Read "N passed" / "N failed" out of one vitest or jest summary line.
+ * Both print the counts in either order, separated by "|" or ",", and the
+ * total either in parentheses (vitest) or as "N total" (jest). A line
+ * without a count word is not a summary line and yields null.
+ */
+function parseSummaryLine(line) {
+  const passed = /\b(\d+)\s+passed\b/.exec(line);
+  const failed = /\b(\d+)\s+failed\b/.exec(line);
+  if (!passed && !failed) return null;
+  const passedCount = passed ? Number(passed[1]) : 0;
+  const failedCount = failed ? Number(failed[1]) : 0;
+  const parenthesized = /\((\d+)\)\s*$/.exec(line);
+  const totalToken = /\b(\d+)\s+total\b/.exec(line);
+  const total = parenthesized
+    ? Number(parenthesized[1])
+    : totalToken
+      ? Number(totalToken[1])
+      : passedCount + failedCount;
+  return { passed: passedCount, failed: failedCount, total };
+}
+
+/**
  * Parse pass/fail counts out of a test runner's output.
  * node --test ("# pass 18", "# fail 0"), pytest ("18 passed, 0 failed"),
  * python -m unittest ("Ran 18 tests" + "OK" / "FAILED (failures=1, errors=0)"),
- * mocha ("18 passing"), npm-wrapped node --test (same "# pass" lines).
+ * mocha ("18 passing"), npm-wrapped node --test (same "# pass" lines),
+ * vitest ("Tests  18 passed (18)") and jest ("Tests:  18 passed, 18 total").
  */
 export function parseReplayCounts(output, command) {
   const text = String(output || '');
@@ -452,6 +561,20 @@ export function parseReplayCounts(output, command) {
     return { passed: bunPass, failed: bunFail, total };
   }
   if (bunPasses.length > 1 || bunFails.length > 1) return null;
+  // vitest and jest print one "Tests" summary per project. The marker word
+  // is mandatory (unlike bun's count-first pair), so a test whose name
+  // starts with "Tests " cannot fire it:
+  //   vitest: "      Tests  18 passed | 2 failed (20)"
+  //   jest:   "Tests:       18 passed, 2 failed, 20 total"
+  // A monorepo run prints one block per project, which is not a single
+  // total, so several markers report unparsed like the multi-block node
+  // case above. (Shape verified against vitest 3 and jest 30 output.)
+  const summaryMarkers = text.match(/^[ \t]*Tests(?::[ \t]+|[ \t]+)(.+)$/gm);
+  if (summaryMarkers && summaryMarkers.length > 1) return null;
+  if (summaryMarkers) {
+    const summary = parseSummaryLine(summaryMarkers[0]);
+    if (summary) return summary;
+  }
   // go test -v prints one "--- PASS:" / "--- FAIL:" line per test.
   // Only top-level tests count: a test name without "/" (e.g.
   // "TestAdd"). Subtest lines carry "/" in the name
