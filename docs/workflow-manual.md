@@ -1107,8 +1107,8 @@ GET /api/events   event: log, id: <entry_hash>
 | event | 来源 | 关键字段 |
 |---|---|---|
 | `agent_start` | codex `thread.started` / claude `system:init` | `adapter` |
-| `tool_start` | codex `item.started`：`command_execution`(→ `tool`=`shell`)、`mcp_tool_call`、`file_change`、`web_search`；claude `tool_use` | `event_type`(CLI 原始 item 类型), `tool`, `args_preview`(≤160 字符), `args_digest`(sha256 前 16 位) |
-| `tool_end` | codex `item.completed` 的同四种 item 类型（`event_type` 区分）；claude 侧没有配对事件 | `event_type`, `tool`, `exit_code`, `status` |
+| `tool_start` | codex `item.started`：`command_execution`(→ `tool`=`shell`)、`mcp_tool_call`、`file_change`、`web_search`；claude `tool_use` | `event_type`(CLI 原始 item 类型), `tool`, `tool_call_id`, `args_preview`(≤160 字符), `args_digest`(sha256 前 16 位) |
+| `tool_end` | codex `item.completed` 的同四种 item 类型（`event_type` 区分）；claude `tool_result`(`event_type`=`tool_result`)，`tool` 用 `tool_use_id` 回查先前那条 `tool_use`；sink 关闭时仍未结束的调用补一条 `abandoned` | `event_type`, `tool`, `tool_call_id`, `exit_code`, `status`(`completed`/`error`/`abandoned`) |
 | `message_end` | codex `agent_message` / claude assistant `text` | `text`(≤2048 字符，超出以 `…` 结尾) |
 | `agent_end` | codex `turn.completed` / claude `result` | `usage`{`input`,`output`,`cache_read`,`cache_write`}, `cost_usd`, `duration_ms` |
 | `raw` | 无法识别、无法解析、或超长被截断的行；CLI 报错（`turn.failed` / `error`） | `reason`(`invalid_json` / `non_object_payload` / `line_truncated`), `event_type`, `level`(`error`), `truncated` |
@@ -1123,9 +1123,11 @@ GET /api/events   event: log, id: <entry_hash>
   "phase": "implementation",
   "atom": "I6a.tdd.run",
   "adapter": "codex_cli",
+  "agent_run_id": "agent_run_5f0c1a9d2b47",
   "seq": 3,
   "event_type": "command_execution",
   "tool": "shell",
+  "tool_call_id": "item_1",
   "args_preview": "npm test",
   "args_digest": "9f2c1e0b7d4a5c88",
   "change_id": "chg-124",
@@ -1136,6 +1138,8 @@ GET /api/events   event: log, id: <entry_hash>
 ```
 
 未知的 CLI 事件类型一律降级为 `raw` 或被忽略，不抛错：CLI 升级不会让整条 workflow 失败。
+
+工具调用遵循一条生命周期约定：`tool_start` 带 `tool_call_id`（claude `tool_use.id`、codex `item.id`），配对的 `tool_end` 带同一个 id；没有 id 的调用不进入配对表——没有 id 就没有可对齐的对象。`agent_run_id` 给一次 agent 进程划范围，两个 atom 并发、各自的 CLI 都从 `toolu_1` 编号时靠它区分。`sink.close()` 会把仍未结束的调用补成 `status: "abandoned"`：被杀掉的那次运行（默认 300 秒超时、Ctrl-C、CLI 崩溃）永远发不出最后一条 `tool_result`，而没有终态的日志等于没有证据。
 
 ### 订阅
 
@@ -1174,7 +1178,7 @@ CHANGE_ID=<id> xflow workflow run workflows/yolo.yaml --progress
 
 ### 性能约束
 
-- 写入：每 200ms 合并一次，单条 `text` ≤2048 字符、`args_preview` ≤160 字符；队列上限 500，超出丢最旧条目并计入 `stats.dropped`。
+- 写入：每 200ms 合并一次，单条 `text` ≤2048 字符、`args_preview` ≤160 字符；队列上限 500，超出丢最旧条目并计入 `stats.dropped`。关闭时补写的 `abandoned` 也走同一条队列、同一个上限，并计入 `stats.events`。
 - 读取：只从字节偏移往后读，单次 ≤4MB；未写完的尾行留到下次；游标只停在换行边界。
 - 哈希链：追加时从文件尾部 16KB 起求 `prev_hash`；若窗口里没有完整行（单条记录大于 16KB），窗口按 4 倍扩大直到找到为止，否则会写出 `prev_hash: null` 把链断掉。缓存按 `(size, mtimeMs)` 失效，避免同尺寸的轮转或截断命中陈旧哈希。
 - 订阅：每个 SSE 连接各自持有一个 200ms 的 tailer，一次 tick 是“stat + 从上次偏移读一小段”，单个看板标签页可以忽略；若将来有大量客户端同时观看同一 run，更省的形状是**一个共享 tailer 广播给所有连接**（当前版本未做）。

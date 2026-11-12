@@ -13,7 +13,7 @@
  * Unknown line shapes degrade to `raw` instead of throwing: a CLI version bump must never be
  * able to break a workflow run.
  */
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
 import { appendExecutionLog } from './execution-log.js';
 
@@ -127,7 +127,8 @@ export function normalizeAgentEvents(raw, options = {}) {
   }
 
   const family = detectFamily(payload, adapter);
-  const mapped = (family === 'claude' ? mapClaudePayload : mapCodexPayload)(payload)
+  const toolNames = options.toolNames instanceof Map ? options.toolNames : null;
+  const mapped = (family === 'claude' ? mapClaudePayload : mapCodexPayload)(payload, { toolNames })
     .filter((event) => event && event.event);
   if (!mapped.length) return [];
   return mapped.map((event) => ({ seq, ...event }));
@@ -163,6 +164,7 @@ function mapCodexPayload(payload) {
 function mapCodexItem(item, phase) {
   if (!item || typeof item !== 'object') return [];
   const itemType = String(item.type || '');
+  const callId = callIdOf(item.id);
   if (itemType === 'agent_message') {
     return phase === 'end' ? [{ event: 'message_end', event_type: itemType, text: truncateText(item.text) }] : [];
   }
@@ -173,31 +175,31 @@ function mapCodexItem(item, phase) {
   if (itemType === 'command_execution') {
     if (phase === 'start') {
       const command = Array.isArray(item.command) ? item.command.join(' ') : String(item.command || '');
-      return [toolStart('shell', command, itemType)];
+      return [toolStart('shell', command, itemType, callId)];
     }
-    return [toolEnd('shell', itemType, item.exit_code, item.status)];
+    return [toolEnd('shell', itemType, item.exit_code, item.status, callId)];
   }
   if (itemType === 'mcp_tool_call') {
     const tool = String(item.name || item.tool || 'mcp_tool');
-    if (phase === 'start') return [toolStart(tool, stringifyArgs(item.arguments ?? item.input ?? item.args), itemType)];
-    return [toolEnd(tool, itemType, item.exit_code, item.status)];
+    if (phase === 'start') return [toolStart(tool, stringifyArgs(item.arguments ?? item.input ?? item.args), itemType, callId)];
+    return [toolEnd(tool, itemType, item.exit_code, item.status, callId)];
   }
   if (itemType === 'file_change') {
     const paths = Array.isArray(item.changes)
       ? item.changes.map((change) => change && change.path).filter(Boolean).join(', ')
       : String(item.path || '');
-    if (phase === 'start') return [toolStart('file_change', paths, itemType)];
-    return [toolEnd('file_change', itemType, item.exit_code, item.status)];
+    if (phase === 'start') return [toolStart('file_change', paths, itemType, callId)];
+    return [toolEnd('file_change', itemType, item.exit_code, item.status, callId)];
   }
   if (itemType === 'web_search') {
     return phase === 'start'
-      ? [toolStart('web_search', String(item.query || ''), itemType)]
-      : [toolEnd('web_search', itemType, null, item.status)];
+      ? [toolStart('web_search', String(item.query || ''), itemType, callId)]
+      : [toolEnd('web_search', itemType, null, item.status, callId)];
   }
   return [];
 }
 
-function mapClaudePayload(payload) {
+function mapClaudePayload(payload, { toolNames } = {}) {
   const type = String(payload.type || '');
   if (type === 'system') {
     return payload.subtype === 'init' ? [{ event: 'agent_start', event_type: 'system:init' }] : [];
@@ -218,15 +220,28 @@ function mapClaudePayload(payload) {
       } else if (block.type === 'tool_use') {
         // Preserve the order the model produced: text first, then the tool call it announced.
         flushText();
-        events.push(toolStart(String(block.name || 'tool'), stringifyArgs(block.input), 'tool_use'));
+        const tool = String(block.name || 'tool');
+        const callId = callIdOf(block.id);
+        if (toolNames && callId) toolNames.set(callId, tool);
+        events.push(toolStart(tool, stringifyArgs(block.input), 'tool_use', callId));
       }
     }
     flushText();
     return events;
   }
   if (type === 'user') {
-    // Tool results echo output the tool_start/tool_end pair already accounted for.
-    return [];
+    // Claude answers a tool call with a `tool_result` block that only carries `tool_use_id`, so the
+    // tool name comes from the `tool_use` line seen earlier (the sink owns that map). Codex users
+    // never reach this branch: its results arrive as `item.completed` instead.
+    const content = Array.isArray(payload.message?.content) ? payload.message.content : [];
+    const events = [];
+    for (const block of content) {
+      if (!block || block.type !== 'tool_result') continue;
+      const callId = callIdOf(block.tool_use_id);
+      const tool = callId && toolNames ? (toolNames.get(callId) ?? null) : null;
+      events.push(toolEnd(tool, 'tool_result', null, block.is_error ? 'error' : 'completed', callId));
+    }
+    return events;
   }
   if (type === 'result') {
     return [{
@@ -247,25 +262,32 @@ function mapClaudePayload(payload) {
   return [];
 }
 
-function toolStart(tool, argsText, eventType) {
+function toolStart(tool, argsText, eventType, callId = null) {
   const text = typeof argsText === 'string' ? argsText : '';
   return {
     event: 'tool_start',
     event_type: eventType,
     tool,
+    tool_call_id: callId,
     args_preview: text ? truncateText(text, MAX_PREVIEW_CHARS) : null,
     args_digest: text ? digest(text) : null,
   };
 }
 
-function toolEnd(tool, eventType, exitCode, status) {
+function toolEnd(tool, eventType, exitCode, status, callId = null) {
   return {
     event: 'tool_end',
     event_type: eventType,
     tool,
+    tool_call_id: callId,
     exit_code: finiteOrNull(exitCode),
     status: status ? String(status) : null,
   };
+}
+
+/** The CLI's own id for a tool call, or null when the payload has none. */
+function callIdOf(value) {
+  return typeof value === 'string' && value ? value : null;
 }
 
 function readCodexUsage(usage) {
@@ -312,9 +334,17 @@ export function createAgentEventSink(options = {}) {
   const adapter = options.adapter || 'unknown';
   const flushIntervalMs = Math.max(0, Number(options.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS));
   const maxQueue = Math.max(1, Number(options.maxQueue) || MAX_QUEUE_LENGTH);
+  // One id per agent process, so two atoms streaming into the same log stay distinguishable even
+  // when their CLIs reuse the same tool-call ids. Injectable so tests can pin it.
+  const agentRunId = typeof options.agentRunId === 'string' && options.agentRunId
+    ? options.agentRunId
+    : `agent_run_${randomBytes(6).toString('hex')}`;
 
   const queue = [];
   const stats = { lines: 0, events: 0, written: 0, dropped: 0, truncated: 0, write_errors: 0 };
+  const toolNames = new Map();
+  // Only id-bearing calls are tracked: without an id there is nothing to pair a closing event to.
+  const openCalls = new Map();
   let seq = 0;
   let timer = null;
   let writing = Promise.resolve();
@@ -323,18 +353,33 @@ export function createAgentEventSink(options = {}) {
   const splitter = createLineSplitter((line) => {
     if (closed || !line) return;
     stats.lines += 1;
-    for (const normalized of normalizeAgentEvents(line, { adapter, seq })) {
+    for (const normalized of normalizeAgentEvents(line, { adapter, seq, toolNames })) {
       seq += 1;
       stats.events += 1;
       if (normalized.truncated) stats.truncated += 1;
-      queue.push(buildRecord(normalized, seq));
-      if (queue.length > maxQueue) {
-        queue.shift();
-        stats.dropped += 1;
-      }
+      rememberCall(normalized);
+      enqueue(buildRecord(normalized, seq));
     }
     schedule();
   });
+
+  function enqueue(record) {
+    queue.push(record);
+    if (queue.length > maxQueue) {
+      queue.shift();
+      stats.dropped += 1;
+    }
+  }
+
+  function rememberCall(event) {
+    const callId = callIdOf(event.tool_call_id);
+    if (!callId) return;
+    if (event.event === 'tool_start') {
+      openCalls.set(callId, { tool: event.tool ?? null, event_type: event.event_type ?? null });
+    } else if (event.event === 'tool_end') {
+      openCalls.delete(callId);
+    }
+  }
 
   function buildRecord(event, eventSeq) {
     const record = {
@@ -343,10 +388,11 @@ export function createAgentEventSink(options = {}) {
       phase,
       atom,
       adapter,
+      agent_run_id: agentRunId,
       seq: eventSeq,
     };
     for (const key of [
-      'event_type', 'tool', 'text', 'args_preview', 'args_digest', 'usage',
+      'event_type', 'tool', 'tool_call_id', 'text', 'args_preview', 'args_digest', 'usage',
       'exit_code', 'status', 'level', 'cost_usd', 'duration_ms', 'reason', 'truncated',
     ]) {
       const value = event[key];
@@ -392,9 +438,27 @@ export function createAgentEventSink(options = {}) {
       if (closed) return;
       splitter.push(chunk);
     },
-    /** Write the trailing partial line, then every queued event. Safe to call twice. */
+    /**
+     * Write the trailing partial line, close any call still open, then every queued event.
+     *
+     * A run that is killed (the default 300s agent timeout, a Ctrl-C, a crashed CLI) never emits
+     * its final `tool_result`, so without this the log would show that tool as running forever.
+     * Safe to call twice.
+     */
     async close() {
       splitter.flush();
+      for (const [callId, call] of openCalls) {
+        seq += 1;
+        stats.events += 1;
+        enqueue(buildRecord({
+          event: 'tool_end',
+          event_type: call.event_type,
+          tool: call.tool,
+          tool_call_id: callId,
+          status: 'abandoned',
+        }, seq));
+      }
+      openCalls.clear();
       closed = true;
       await flush();
       return stats;
