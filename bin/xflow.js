@@ -43,6 +43,7 @@ import { createHash } from 'crypto';
 import { tmpdir } from 'os';
 import { ackPendingGate } from '../src/core/pending-gates.js';
 import { runAudit, renderAuditReport, parseAuditTarget } from '../src/core/audit.js';
+import { runBatchAudit, renderBatchReport, DEFAULT_BATCH_LIMIT } from '../src/core/audit-batch.js';
 import { auditReportToSarif, proofToSarif, writeSarifFile } from '../src/core/sarif.js';
 import { aggregateTrend, collectTrendRecords, parseSinceDate, renderTrendReport } from '../src/core/trend.js';
 import { readEntriesFromOffset, readExecutionLogSize } from '../src/core/log-tail.js';
@@ -5894,7 +5895,7 @@ async function handleAudit(args) {
   // parseCliArgs drops bare words, so collect positionals here, skipping
   // the values of flags that take one. A positional conflicts with the
   // equivalent --pr / --diff flag.
-  const AUDIT_VALUE_FLAGS = new Set(['pr', 'diff', 'repo', 'base', 'head', 'claims', 'claims_file', 'out', 'sarif', 'timeout']);
+  const AUDIT_VALUE_FLAGS = new Set(['pr', 'diff', 'repo', 'base', 'head', 'claims', 'claims_file', 'out', 'sarif', 'timeout', 'batch', 'since', 'limit']);
   const positionals = [];
   for (let i = 0; i < args.length; i++) {
     const part = args[i];
@@ -5908,6 +5909,56 @@ async function handleAudit(args) {
   if (positionals.length > 1) {
     console.error(`xflow audit: expected one <diff|PR> target, got ${positionals.length}: ${positionals.join(' ')}`);
     process.exit(2);
+  }
+  // Batch mode (M12, issue #172): `xflow audit --batch <repo>
+  // [--since <date>] [--limit N]`. The repo is the --batch value, or the
+  // single positional when --batch carries no value.
+  if (parsedArgs.batch !== undefined) {
+    let repoArg = typeof parsedArgs.batch === 'string' ? parsedArgs.batch : null;
+    if (!repoArg) {
+      if (positionals.length === 1) repoArg = positionals[0];
+      else {
+        console.error('Usage: xflow audit --batch <repo> [--since <date>] [--limit N] [--json] [--out <file>]');
+        process.exit(2);
+      }
+    } else if (positionals.length > 0) {
+      console.error(`xflow audit --batch: unexpected extra argument: ${positionals.join(' ')}`);
+      process.exit(2);
+    }
+    let since = null;
+    if (parsedArgs.since !== undefined) {
+      try {
+        parseSinceDate(String(parsedArgs.since));
+        since = String(parsedArgs.since);
+      } catch (error) {
+        console.error(`xflow audit --batch: ${error.message}`);
+        process.exit(2);
+      }
+    }
+    let limit = DEFAULT_BATCH_LIMIT;
+    if (parsedArgs.limit !== undefined) {
+      limit = Number(parsedArgs.limit);
+      if (!Number.isInteger(limit) || limit < 1) {
+        console.error('xflow audit --batch: --limit must be a positive integer');
+        process.exit(2);
+      }
+    }
+    let batch;
+    try {
+      batch = await runBatchAudit(repoArg, {
+        since,
+        limit,
+        timeoutMs,
+        i6d: !parsedArgs.no_i6d,
+      });
+    } catch (error) {
+      console.error(`xflow audit --batch: ${error.message}`);
+      process.exit(2);
+    }
+    if (parsedArgs.out) writeFileSync(resolve(parsedArgs.out), `${JSON.stringify(batch, null, 2)}\n`);
+    if (parsedArgs.json) console.log(JSON.stringify(batch, null, 2));
+    else console.log(renderBatchReport(batch));
+    process.exit(batch.exitCode);
   }
   if (positionals.length === 1) {
     if (parsedArgs.pr || parsedArgs.diff) {
@@ -6971,6 +7022,7 @@ Usage: xflow audit <diff|PR> [--base <ref>] [--claims-file <file>] [--json] [--o
        xflow audit --pr <n> [--repo <path>] [--json] [--out <file>]
        xflow audit --diff <patch|-> --base <ref> [--claims-file <file>] [--json]
        xflow audit --base <ref> --head <ref> [--claims <text>] [--json] [--sarif <file>]
+       xflow audit --batch <repo|path> [--since YYYY-MM-DD] [--limit N] [--json] [--out <file>]
 
 Audit any git diff / PR without adopting evalid workflows: extract the test
 runs the change claims to have passed, replay each one in a clean clone at
@@ -6986,6 +7038,13 @@ the scratch clone (scoped to the diff): unexecuted in-diff assertions flip
 the verdict to mismatch, since a green run that never executed an assertion
 must not count as green. No seal semantics, CLI name, or bin path changes.
 
+Batch mode audits every merged PR in the window with the same single-PR
+flow, one row per PR plus a summary (per-verdict counts, discrepancy rate
+= mismatch / total). A PR whose replay fails is recorded on its row and
+does not stop the batch; a mismatch is re-run once before it is settled
+(#169 timing flake). Enumeration uses the gh API (see src/core/audit-batch.js
+for the choice and its reasons), so --batch needs gh authenticated.
+
 Verdicts / exit codes: verified 0, mismatch 1, unverifiable 1, misuse 2,
 no_claims 3 (no test claims found in the supplied text).
 
@@ -6999,6 +7058,10 @@ Options:
   --claims-file FILE  Read claims text from a file
   --timeout SEC       Per-command replay timeout, default: 300
   --no-i6d            Skip the I6d assertion-execution gate
+  --batch REPO        Batch mode: audit merged PRs of a local path or
+                      owner/repo (gh API enumeration, see audit-batch.js)
+  --since YYYY-MM-DD  Batch only: only PRs merged on or after this date
+  --limit N           Batch only: max merged PRs to enumerate, default: 20
   --json              Print the machine-readable report
   --out FILE          Write the JSON report to a file
   --sarif FILE        Write the claim-vs-evidence findings as SARIF 2.1.0
