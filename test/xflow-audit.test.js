@@ -131,6 +131,19 @@ describe('extractClaims', () => {
     assert.deepEqual(extractClaims('Just a refactor, no tests mentioned.'), []);
   });
 
+  test('distinguishes passed/failed from passed/total in X/Y (M13 slice 1, #178)', () => {
+    // Second number smaller than the first cannot be a total: it is the
+    // failed count (M12 batch audit: 472/12 used to yield failed -460).
+    assert.deepEqual(parseClaimCounts('472/12'), { passed: 472, failed: 12 });
+    assert.deepEqual(parseClaimCounts('240/0'), { passed: 240, failed: 0 });
+    // Second number greater than or equal to the first is the total.
+    assert.deepEqual(parseClaimCounts('61/64'), { passed: 61, total: 64, failed: 3 });
+    // Boundaries: total == passed (zero failures), and no second number.
+    assert.deepEqual(parseClaimCounts('240/240'), { passed: 240, total: 240, failed: 0 });
+    assert.deepEqual(parseClaimCounts('472 passed'), { passed: 472 });
+    assert.deepEqual(parseClaimCounts('0/5'), { passed: 0, total: 5, failed: 5 });
+  });
+
   test('parses label-first counts: node --test summary style (M2 slice 2, #116)', () => {
     // senpi PRs report "reports `pass 8`, `fail 0`" — the count-first
     // patterns never fired, so the RED claim (pass 0, fail 4) was silently

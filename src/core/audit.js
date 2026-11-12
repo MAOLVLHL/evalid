@@ -220,11 +220,25 @@ function normalizeCommand(raw) {
 export function parseClaimCounts(line) {
   const text = String(line || '');
   const counts = {};
+  // X/Y is ambiguous: it is written both as passed/total ("6/6 pass")
+  // and as passed/failed ("472/12" = 472 passed, 12 failed). Disambiguate
+  // by magnitude — a total can never be smaller than the passed count, so
+  // when the second number is smaller than the first it must be the failed
+  // count; when it is greater than or equal to the first it is the total
+  // and failed = total - passed. The failed branch sets no total: the
+  // total is unknown (passed + failed is not asserted — a run may also
+  // have skipped tests).
   let m = text.match(/(\d+)\s*\/\s*(\d+)\s*(?:pass|passed|通过|✔|✅)?/);
   if (m) {
-    counts.passed = Number(m[1]);
-    counts.total = Number(m[2]);
-    counts.failed = counts.total - counts.passed;
+    const first = Number(m[1]);
+    const second = Number(m[2]);
+    counts.passed = first;
+    if (second < first) {
+      counts.failed = second;
+    } else {
+      counts.total = second;
+      counts.failed = second - first;
+    }
     return counts;
   }
   m = text.match(/(\d+)\s*(?:tests?|items?|项)[^0-9]{0,20}?(?:all\s+pass|pass|passed|通过)/i);
