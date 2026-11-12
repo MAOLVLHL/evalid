@@ -26,10 +26,10 @@ function linesOf(fixture) {
   return fixture.trim().split('\n');
 }
 
-function collect(fixture, adapter) {
+function collect(fixture, adapter, options = {}) {
   const events = [];
   for (const line of linesOf(fixture)) {
-    events.push(...normalizeAgentEvents(line, { adapter, seq: events.length }));
+    events.push(...normalizeAgentEvents(line, { adapter, seq: events.length, ...options }));
   }
   return events;
 }
@@ -113,20 +113,52 @@ describe('Agent stream', () => {
     });
 
     test('maps a claude stream-json run onto the event vocabulary', () => {
-      const events = collect(claudeFixture, 'claude_cli');
+      const events = collect(claudeFixture, 'claude_cli', { toolNames: new Map() });
       assert.deepEqual(events.map((event) => event.event), [
         'agent_start',
         'message_end',
         'tool_start',
+        'tool_end',
         'tool_start',
+        'tool_end',
         'agent_end',
       ]);
       assert.equal(events[1].text, 'Reading the phase artifact template.');
       assert.equal(events[2].tool, 'Read');
       assert.equal(events[2].args_digest.length, 16);
-      assert.equal(events[4].cost_usd, 0.0412);
-      assert.equal(events[4].duration_ms, 184000);
-      assert.deepEqual(events[4].usage, { input: 900, output: 210, cache_read: 400 });
+      assert.equal(events[6].cost_usd, 0.0412);
+      assert.equal(events[6].duration_ms, 184000);
+      assert.deepEqual(events[6].usage, { input: 900, output: 210, cache_read: 400 });
+    });
+
+    test('pairs every claude tool_result back to the tool_use that started it', () => {
+      const events = collect(claudeFixture, 'claude_cli', { toolNames: new Map() });
+      const starts = events.filter((event) => event.event === 'tool_start');
+      const ends = events.filter((event) => event.event === 'tool_end');
+      assert.deepEqual(starts.map((event) => event.tool_call_id), ['toolu_1', 'toolu_2']);
+      assert.deepEqual(ends.map((event) => event.tool_call_id), ['toolu_1', 'toolu_2']);
+      assert.deepEqual(ends.map((event) => event.tool), ['Read', 'Write']);
+      assert.deepEqual(ends.map((event) => event.status), ['completed', 'completed']);
+    });
+
+    test('marks a failed claude tool_result as an error end', () => {
+      const toolUse = '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_9","name":"Bash","input":{"command":"npm test"}}]}}';
+      const failed = '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_9","is_error":true,"content":"exit 1"}]}}';
+      const events = collect(toolUse + '\n' + failed, 'claude_cli', { toolNames: new Map() });
+      assert.deepEqual(events.map((event) => event.event), ['tool_start', 'tool_end']);
+      assert.equal(events[1].tool, 'Bash');
+      assert.equal(events[1].tool_call_id, 'toolu_9');
+      assert.equal(events[1].status, 'error');
+    });
+
+    test('keeps a claude tool_end readable when the matching tool_use was never seen', () => {
+      const orphan = '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_ghost","content":"ok"}]}}';
+      const events = collect(orphan, 'claude_cli', { toolNames: new Map() });
+      assert.equal(events.length, 1);
+      assert.equal(events[0].event, 'tool_end');
+      assert.equal(events[0].tool, null);
+      assert.equal(events[0].tool_call_id, 'toolu_ghost');
+      assert.equal(events[0].status, 'completed');
     });
 
     test('degrades unknown and malformed lines to raw events instead of throwing', () => {
@@ -216,6 +248,57 @@ describe('Agent stream', () => {
         const log = await readExecutionLog(projectRoot, { limit: 10 });
         const events = log.entries.filter((entry) => entry.kind === 'agent_event').reverse();
         assert.deepEqual(events.map((entry) => entry.args_preview), ['step-2', 'step-3']);
+      } finally {
+        rmSync(projectRoot, { recursive: true, force: true });
+      }
+    });
+
+    test('closes a call that is still open when the agent is killed', async () => {
+      const projectRoot = makeProjectRoot();
+      try {
+        const sink = createAgentEventSink({
+          projectRoot,
+          adapter: 'claude_cli',
+          flushIntervalMs: 5,
+          agentRunId: 'agent_run_test',
+        });
+        const toolUse = { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'toolu_7', name: 'Bash', input: { command: 'sleep 999' } }] } };
+        sink.push(`${JSON.stringify(toolUse)}\n`);
+        const stats = await sink.close();
+        assert.equal(stats.events, 2, 'the abandoned end counts as an event');
+
+        const log = await readExecutionLog(projectRoot, { limit: 10 });
+        assert.equal(log.chain.ok, true);
+        const events = log.entries.filter((entry) => entry.kind === 'agent_event').reverse();
+        assert.deepEqual(events.map((entry) => entry.event), ['tool_start', 'tool_end']);
+        assert.equal(events[1].status, 'abandoned');
+        assert.equal(events[1].tool, 'Bash');
+        assert.equal(events[1].tool_call_id, 'toolu_7');
+        assert.ok(events.every((entry) => entry.agent_run_id === 'agent_run_test'));
+      } finally {
+        rmSync(projectRoot, { recursive: true, force: true });
+      }
+    });
+
+    test('scopes concurrent agent runs so their tool-call ids cannot collide', async () => {
+      const projectRoot = makeProjectRoot();
+      try {
+        const start = (sink, command) => sink.push(`${JSON.stringify({ type: 'item.started', item: { id: 'item_1', type: 'command_execution', command } })}\n`);
+        const first = createAgentEventSink({ projectRoot, adapter: 'codex_cli', flushIntervalMs: 5, agentRunId: 'agent_run_a' });
+        const second = createAgentEventSink({ projectRoot, adapter: 'codex_cli', flushIntervalMs: 5, agentRunId: 'agent_run_b' });
+        start(first, 'npm test');
+        start(second, 'npm run build');
+        await first.close();
+        await second.close();
+
+        const log = await readExecutionLog(projectRoot, { limit: 20 });
+        assert.equal(log.chain.ok, true);
+        const events = log.entries.filter((entry) => entry.kind === 'agent_event');
+        const perRun = new Map();
+        for (const entry of events) perRun.set(entry.agent_run_id, (perRun.get(entry.agent_run_id) || 0) + 1);
+        assert.deepEqual([...perRun.keys()].sort(), ['agent_run_a', 'agent_run_b']);
+        assert.deepEqual([...perRun.values()], [2, 2]);
+        assert.ok(events.every((entry) => entry.tool_call_id === 'item_1'));
       } finally {
         rmSync(projectRoot, { recursive: true, force: true });
       }
