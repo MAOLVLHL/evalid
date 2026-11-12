@@ -1,0 +1,9 @@
+{"type":"thread.started","thread_id":"01a1cf05-073a-7370-bbf4-d18a84006e81"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll run `ls` and count the files without modifying anything.\n"}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc ls","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc ls","aggregated_output":"sample.txt\n","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"/bin/zsh -lc 'find . -maxdepth 1 -type f | wc -l'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"/bin/zsh -lc 'find . -maxdepth 1 -type f | wc -l'","aggregated_output":"       1\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"`ls` listed `sample.txt`.\n\nThere is **1 file**. Nothing was modified."}}
+{"type":"turn.completed","usage":{"input_tokens":52943,"cached_input_tokens":33408,"cache_write_input_tokens":0,"output_tokens":123,"reasoning_output_tokens":0}}

@@ -18,6 +18,10 @@ const codexFixture = readFileSync(join(FIXTURES, 'codex.ndjson'), 'utf8');
 const claudeFixture = readFileSync(join(FIXTURES, 'claude.ndjson'), 'utf8');
 const claudeErrorKilledFixture = readFileSync(join(FIXTURES, 'claude-error-killed.ndjson'), 'utf8');
 const codexKilledFixture = readFileSync(join(FIXTURES, 'codex-killed.ndjson'), 'utf8');
+// M14 slice 2 (#187): verbatim recordings from real codex runs (gocc, 2026-11-12).
+const codexRealNormalLsFixture = readFileSync(join(FIXTURES, 'codex-real-normal-ls.ndjson'), 'utf8');
+const codexRealKilledSleepFixture = readFileSync(join(FIXTURES, 'codex-real-killed-sleep.ndjson'), 'utf8');
+const codexRealNormalReadFixture = readFileSync(join(FIXTURES, 'codex-real-normal-read.ndjson'), 'utf8');
 
 function makeProjectRoot() {
   const root = mkdtempSync(join(tmpdir(), 'openflow-agent-stream-'));
@@ -35,6 +39,17 @@ function collect(fixture, adapter, options = {}) {
     events.push(...normalizeAgentEvents(line, { adapter, seq: events.length, ...options }));
   }
   return events;
+}
+
+/** Terminal state of every id-bearing call in a replayed log, or null when a call has none. */
+function terminalStates(events) {
+  const states = new Map();
+  for (const event of events) {
+    if (!event.tool_call_id) continue;
+    if (event.event === 'tool_start') states.set(event.tool_call_id, { tool: event.tool, status: 'running' });
+    if (event.event === 'tool_end') states.set(event.tool_call_id, { tool: event.tool, status: event.status });
+  }
+  return states;
 }
 
 /** Every id-bearing tool_start has exactly one tool_end with the same id. */
@@ -513,6 +528,80 @@ describe('Agent stream', () => {
         }
       } finally {
         rmSync(projectRoot, { recursive: true, force: true });
+      }
+    });
+  });
+
+  // M14 slice 2 (#187): verbatim recordings from real codex runs (gocc, 2026-11-12,
+  // codex-cli 0.166.0, ChatGPT login). The claude half is still open: no logged-in claude
+  // CLI is reachable from this worker (SSH or GUI-bridge context both report "Not logged
+  // in"), so no claude fixture here claims to be a real recording.
+  describe('real recorded codex streams', () => {
+    const realRuns = [
+      { name: 'codex-real-normal-ls', fixture: codexRealNormalLsFixture, calls: 2, killed: false },
+      { name: 'codex-real-normal-read', fixture: codexRealNormalReadFixture, calls: 1, killed: false },
+      { name: 'codex-real-killed-sleep', fixture: codexRealKilledSleepFixture, calls: 1, killed: true },
+    ];
+
+    test('replays three real codex runs with zero pairing violations', async () => {
+      for (const run of realRuns) {
+        const events = collect(run.fixture, 'codex_cli');
+        assert.deepEqual(checkPairing(events), [], `${run.name}: clean replay`);
+        const projectRoot = makeProjectRoot();
+        try {
+          const { sink, stats, events: logged } = await replayFixture(projectRoot, run.fixture, 'codex_cli', { agentRunId: 'agent_run_test' });
+          assert.equal(stats.pairing_violations, 0, `${run.name}: no sink violations`);
+          assert.deepEqual(sink.pairingViolations, []);
+          assertPaired(logged);
+          assert.equal(
+            logged.filter((entry) => entry.event === 'tool_start').length,
+            run.calls,
+            `${run.name}: tool call count`,
+          );
+        } finally {
+          rmSync(projectRoot, { recursive: true, force: true });
+        }
+      }
+    });
+
+    test('the killed real run closes its open call as abandoned', async () => {
+      const projectRoot = makeProjectRoot();
+      try {
+        const { stats, events } = await replayFixture(projectRoot, codexRealKilledSleepFixture, 'codex_cli', { agentRunId: 'agent_run_test' });
+        assert.equal(stats.pairing_violations, 0);
+        assert.equal(stats.events, 4, 'agent_start + message_end + tool_start + abandoned end');
+        assert.deepEqual(events.map((entry) => entry.event), ['agent_start', 'message_end', 'tool_start', 'tool_end']);
+        assert.equal(events[2].tool, 'shell');
+        assert.equal(events[2].tool_call_id, 'item_1');
+        assert.equal(events[3].status, 'abandoned');
+        assert.equal(events[3].tool_call_id, 'item_1');
+      } finally {
+        rmSync(projectRoot, { recursive: true, force: true });
+      }
+    });
+
+    test('acceptance 2: after replay + close, every call shows a terminal state', async () => {
+      for (const run of realRuns) {
+        const projectRoot = makeProjectRoot();
+        try {
+          const { events } = await replayFixture(projectRoot, run.fixture, 'codex_cli', { agentRunId: 'agent_run_test' });
+          const states = terminalStates(events);
+          assert.equal(states.size, run.calls, `${run.name}: one terminal row per call`);
+          for (const [callId, state] of states) {
+            assert.ok(
+              ['completed', 'error', 'abandoned'].includes(state.status),
+              `${run.name}: ${callId} left ${state.status}, not terminal`,
+            );
+          }
+          if (run.killed) {
+            assert.equal([...states.values()][0].status, 'abandoned');
+          } else {
+            assert.ok([...states.values()].every((state) => state.status === 'completed'));
+            assert.ok(events.some((entry) => entry.event === 'agent_end'), `${run.name}: agent_end present`);
+          }
+        } finally {
+          rmSync(projectRoot, { recursive: true, force: true });
+        }
       }
     });
   });
