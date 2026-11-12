@@ -1,5 +1,17 @@
 # Release Notes
 
+## 0.5.32 - Milestone M12 "`xflow audit --batch` 整仓批量审计" accepted
+
+Patch release. One merged PR since 0.5.31, verified end to end in CI and locally — and the milestone it completes is now accepted.
+
+**Milestone M12 "`xflow audit --batch` 整仓批量审计" — accepted (issue #69; acceptance detail issue #171, comment 6814927635; #171 closed 2026-11-12T04:52:24Z).** `xflow audit --batch` now audits a whole window of merged PRs in one run, emitting a per-PR verdict table plus a summary (verdict counts, divergence rate) as JSON. Slice 1 (PR #173, merged 2026-11-12T01:48:48Z, squash 5dd1d584) adds the `--batch` command core: per-PR verdicts (verified / mismatch / no_claims / unverifiable / error), one automatic retry on mismatch before the verdict is fixed, and a batch summary.
+
+**Acceptance evidence, all measured, not worker claims.** Three real repos audited in one window (`--since 2026-11-11 --limit 5` each, main 5dd1d584): evalid 5 rows (verified 0, mismatch 5, divergence rate 1.0), swrm 5 rows (verified 0, mismatch 3, no_claims 2, divergence rate 0.6), senpi 5 rows first run all unverifiable (clone failed: /tmp 512M tmpfs out of space), then re-run with TMPDIR in the workspace (528.9s, exit 0) giving verified 2, no_claims 3, mismatch 0. Every row's claimed/replayed counts were cross-checked against the batch logs and JSONs. The 8 mismatches were each classified by mechanism — claim-extraction limits, replay timeouts (~300s per attempt on swrm), and environment gaps (`pytest` not on PATH) — and none was classified as a real PR quality issue. Evidence filed at #174, comments 6814581106 and 6814870874, whose numbers agree with each other; the main round independently re-read the batch JSONs before accepting.
+
+Honest note, stated plainly: the 0 verified in the evalid/swrm batches is not a quality conclusion — every mismatch in those two batches traces to an extraction limit, a replay timeout, or an environment gap, not to a PR being wrong; the senpi re-run's 2 verified were judged on exit-code agreement only, with no count comparison. Known issue, stated plainly: #160's claimed `failed=-460` is a real extraction bug in `parseClaimCounts` (an `A/B` written as passed/failed is misread as passed/total), filed as follow-up issue #175 (OPEN); correcting the claim to 472/12 does not flip #160's mismatch verdict.
+
+Acceptance ledger, stated plainly: the issue #5 ledger is settled as a conclusion on the MiniMax full-matrix recheck (135/135 complete, 2026-11-10) — P2-1 passed, P1-2 / P1-3 / P2-3 did not pass — so no bench numbers are claimed in this release.
+
 ## 0.5.31 - Milestone M11 "Go test 计数精确到顶层测试" accepted
 
 Patch release. Two merged PRs since 0.5.30, verified end to end in CI and locally — and the milestone they complete is now accepted.
