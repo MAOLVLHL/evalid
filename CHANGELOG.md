@@ -3,6 +3,15 @@
 All notable changes to this project are documented here. Detailed notes live in
 [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## [0.5.33] - 2026-11-12
+
+### Fixed
+- **Milestone M13 "声称抽取 A/B 口径修复" — accepted (issue #69; acceptance detail issue #177, comment 6815860645; #177 closed 2026-11-12T05:50:45Z)**: `parseClaimCounts` now distinguishes the two `X/Y` claim writings instead of always reading them as passed/total — when the second number is smaller than the first it cannot be a total, so it is read as passed/failed (failed = the second number, no total set); when the second number is greater than or equal to the first it is read as passed/total (failed = total − passed). ① Slice 1 (PR #179, merged 2026-11-12T05:21:41Z, squash ceece473): the disambiguation rule in `src/core/audit.js` plus regression tests covering both writings and boundaries. Acceptance evidence, all measured, not worker claims: the main round directly measured 8 groups on merged main (ceece473) — 472/12 → {passed: 472, failed: 12}, 240/0 → {passed: 240, failed: 0}, 61/64 → {passed: 61, total: 64, failed: 3}, 56/0, 126/0, 64/1, 240/240, 0/5 — all correct; slice 1's 6 new regression assertions independently re-run and passing. #160 real re-review (evidence #180, comment 6815694863): verdict still mismatch, 5 claims — the first claim is now read as 472 passed / 12 failed (total unset), the other 4 claims identical to the M12 JSON; the 3 mismatches are all replay environment gaps / pre-existing failures (`go` not on PATH, the pre-existing `npm test` i6d failure, `skill:diff` environment gap), 0 pointing at a PR quality issue. #173's two pytest claims still parse as 61 passed / total 64 / failed 3 — the new reading does not harm passed/total claims. Regression: audit suites 120/123, the 3 failures same names and same cause as the clean-main baseline (I6d pytest cases, `pytest` not on PATH in this VM), zero regression. The main round re-read the raw audit JSONs number-for-number before accepting.
+
+Honest note, stated plainly: the three mismatches in the #160 re-review are replay environment gaps / pre-existing failures, not PR quality issues; correcting the claim to 472/12 does not flip #160's mismatch verdict. This milestone closes the extraction bug filed as issue #175 (closed 2026-11-12T05:51:04Z, together with evidence issue #180, closed 2026-11-12T05:50:55Z).
+
+Acceptance ledger, stated plainly: the issue #5 ledger is settled as a conclusion on the MiniMax full-matrix recheck (135/135 complete, 2026-11-10) — P2-1 passed, P1-2 / P1-3 / P2-3 did not pass — so no bench numbers are claimed in this release.
+
 ## [0.5.32] - 2026-11-12
 
 ### Added
